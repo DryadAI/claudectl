@@ -435,13 +435,51 @@ mod tests {
     }
 
     #[test]
+    fn bounded_retries_preserve_failure_and_evidence() {
+        let graph = compiler::compile(GraphSpec {
+            version: 1,
+            id: "retry-test".into(),
+            goal: None,
+            policy: GraphPolicy {
+                max_attempts_per_node: 2,
+                ..GraphPolicy::default()
+            },
+            nodes: vec![NodeSpec {
+                id: "fail".into(),
+                kind: NodeKind::Check,
+                description: None,
+                requires: vec!["shell.execute".into()],
+                authority: Authority::default(),
+                risk: RiskLevel::Low,
+                retry: RetryPolicy { max_attempts: 2 },
+                inputs: vec![],
+                outputs: vec![],
+                executor: Some(ExecutorSpec::Shell {
+                    command: "exit 1".into(),
+                    cwd: None,
+                }),
+            }],
+            edges: vec![],
+        })
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let report = run_with_base(&graph, dir.path()).unwrap();
+        let result = &report.nodes["fail"];
+        assert_eq!(result.outcome, Outcome::Fail);
+        assert_eq!(result.attempts, 2);
+        assert_eq!(result.evidence.len(), 2);
+        assert!(!report.succeeded());
+    }
+
+    #[test]
     fn dependency_on_unknown_becomes_unknown() {
         let mut graph = provider_graph();
         graph.spec.nodes.push(NodeSpec {
             id: "after".into(),
             kind: NodeKind::Tool,
             description: None,
-            requires: vec![],
+            requires: vec!["other".into()],
             authority: Authority::default(),
             risk: RiskLevel::Low,
             retry: RetryPolicy::default(),
