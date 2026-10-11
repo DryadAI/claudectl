@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::compiler::CompiledGraph;
 use super::provider::{ProviderConfidence, ProviderContext, ProviderRegistry};
+use super::rea::ReaCliProvider;
 use super::schema::{Authority, ExecutorSpec, NodeKind, NodeSpec, Outcome};
 
 const OUTPUT_MAX_BYTES: usize = 64 * 1024;
@@ -65,7 +66,10 @@ impl RunReport {
 
 pub fn run(compiled: &CompiledGraph) -> io::Result<RunReport> {
     let base = std::env::current_dir()?.join(".claudectl-runs");
-    run_with_base(compiled, &base)
+    let rea = ReaCliProvider;
+    let mut providers = ProviderRegistry::new();
+    providers.register(&rea);
+    run_with_registry(compiled, &providers, &base)
 }
 
 fn run_with_base(compiled: &CompiledGraph, base: &Path) -> io::Result<RunReport> {
