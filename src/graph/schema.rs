@@ -85,6 +85,8 @@ pub enum ExecutorSpec {
         capability: String,
         #[serde(default)]
         provider: Option<String>,
+        #[serde(default)]
+        request: serde_json::Value,
     },
 }
 
