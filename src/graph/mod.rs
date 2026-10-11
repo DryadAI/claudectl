@@ -1,4 +1,5 @@
 pub mod compiler;
+pub mod provider;
 pub mod runner;
 pub mod schema;
 
