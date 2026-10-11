@@ -61,7 +61,12 @@ impl RunReport {
 }
 
 pub fn run(compiled: &CompiledGraph) -> io::Result<RunReport> {
-    let run_dir = create_run_dir()?;
+    let base = std::env::current_dir()?.join(".claudectl-runs");
+    run_with_base(compiled, &base)
+}
+
+fn run_with_base(compiled: &CompiledGraph, base: &Path) -> io::Result<RunReport> {
+    let run_dir = create_run_dir(base)?;
     let evidence_path = run_dir.join("evidence.jsonl");
     let mut results: BTreeMap<String, NodeExecution> = BTreeMap::new();
 
@@ -340,9 +345,8 @@ fn append_evidence(path: &Path, evidence: &EvidenceRecord) -> io::Result<()> {
     writeln!(file, "{line}")
 }
 
-fn create_run_dir() -> io::Result<PathBuf> {
-    let base = std::env::current_dir()?.join(".claudectl-runs");
-    fs::create_dir_all(&base)?;
+fn create_run_dir(base: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(base)?;
     let dir = base.join(format!(
         "graph-{}-{}",
         now_epoch_ms(),
@@ -404,7 +408,7 @@ mod tests {
                 id: "inspect".into(),
                 kind: NodeKind::Tool,
                 description: None,
-                requires: vec![],
+                requires: vec!["rea.binary.inspect".into()],
                 authority: Authority::default(),
                 risk: RiskLevel::Low,
                 retry: RetryPolicy::default(),
@@ -424,10 +428,7 @@ mod tests {
     fn provider_without_registration_is_unknown_not_pass() {
         let graph = provider_graph();
         let dir = tempfile::tempdir().unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let report = run(&graph).unwrap();
-        std::env::set_current_dir(original).unwrap();
+        let report = run_with_base(&graph, dir.path()).unwrap();
 
         assert_eq!(report.nodes["inspect"].outcome, Outcome::Unknown);
         assert!(!report.succeeded());
@@ -465,10 +466,7 @@ mod tests {
         graph = compiler::compile(graph.spec).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let report = run(&graph).unwrap();
-        std::env::set_current_dir(original).unwrap();
+        let report = run_with_base(&graph, dir.path()).unwrap();
 
         assert_eq!(report.nodes["after"].outcome, Outcome::Unknown);
         assert_eq!(report.nodes["after"].attempts, 0);
