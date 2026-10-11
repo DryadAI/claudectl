@@ -123,27 +123,44 @@ fn validate_node(node: &NodeSpec, spec: &GraphSpec) -> Result<(), String> {
                     node.id
                 ));
             }
+            require_capability(node, "human.approval")?;
         }
         _ => {
             let executor = node.executor.as_ref().ok_or_else(|| {
                 format!("node '{}' of kind {:?} requires an executor", node.id, node.kind)
             })?;
             match executor {
-                ExecutorSpec::Shell { command, .. } if command.trim().is_empty() => {
-                    return Err(format!("node '{}' shell command must not be empty", node.id));
+                ExecutorSpec::Shell { command, .. } => {
+                    if command.trim().is_empty() {
+                        return Err(format!("node '{}' shell command must not be empty", node.id));
+                    }
+                    require_capability(node, "shell.execute")?;
                 }
-                ExecutorSpec::Provider { capability, .. } if capability.trim().is_empty() => {
-                    return Err(format!(
-                        "node '{}' provider capability must not be empty",
-                        node.id
-                    ));
+                ExecutorSpec::Provider { capability, .. } => {
+                    if capability.trim().is_empty() {
+                        return Err(format!(
+                            "node '{}' provider capability must not be empty",
+                            node.id
+                        ));
+                    }
+                    require_capability(node, capability)?;
                 }
-                _ => {}
             }
         }
     }
 
     Ok(())
+}
+
+fn require_capability(node: &NodeSpec, capability: &str) -> Result<(), String> {
+    if node.requires.iter().any(|required| required == capability) {
+        Ok(())
+    } else {
+        Err(format!(
+            "node '{}' executor requires capability '{}' but it is not declared in requires",
+            node.id, capability
+        ))
+    }
 }
 
 fn validate_ports(node_id: &str, label: &str, ports: &[PortSpec]) -> Result<(), String> {
@@ -512,6 +529,32 @@ mod tests {
             dependency_only: true,
         };
         assert!(compile(graph(vec![approval, mutate], vec![edge])).is_ok());
+    }
+
+    #[test]
+    fn executor_capability_must_be_declared() {
+        let mut n = shell_node("n");
+        n.requires.clear();
+        let err = compile(graph(vec![n], vec![])).unwrap_err();
+        assert!(err.contains("shell.execute"));
+
+        let provider = NodeSpec {
+            id: "inspect".into(),
+            kind: NodeKind::Tool,
+            description: None,
+            requires: vec![],
+            authority: Authority::default(),
+            risk: RiskLevel::Low,
+            retry: RetryPolicy::default(),
+            inputs: vec![],
+            outputs: vec![],
+            executor: Some(ExecutorSpec::Provider {
+                capability: "rea.binary.inspect".into(),
+                provider: Some("rea".into()),
+            }),
+        };
+        let err = compile(graph(vec![provider], vec![])).unwrap_err();
+        assert!(err.contains("rea.binary.inspect"));
     }
 
     #[test]
