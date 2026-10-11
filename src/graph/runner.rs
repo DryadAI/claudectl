@@ -72,6 +72,7 @@ pub fn run(compiled: &CompiledGraph) -> io::Result<RunReport> {
     run_with_registry(compiled, &providers, &base)
 }
 
+#[cfg(test)]
 fn run_with_base(compiled: &CompiledGraph, base: &Path) -> io::Result<RunReport> {
     let providers = ProviderRegistry::new();
     run_with_registry(compiled, &providers, base)
@@ -133,14 +134,13 @@ fn run_with_registry(
             let max_attempts = node.retry.max_attempts;
 
             for attempt in 1..=max_attempts {
-                let record =
-                    execute_once(
-                        node,
-                        &compiled.fingerprint,
-                        attempt,
-                        providers,
-                        &run_dir,
-                    )?;
+                let record = execute_once(
+                    node,
+                    &compiled.fingerprint,
+                    attempt,
+                    providers,
+                    &run_dir,
+                )?;
                 final_outcome = record.outcome;
                 append_evidence(&evidence_path, &record)?;
                 records.push(record);
@@ -366,7 +366,7 @@ fn execute_once(
                     artifacts: Vec::new(),
                 }),
             }
-        },
+        }
         None => Ok(EvidenceRecord {
             node_id: node.id.clone(),
             attempt,
