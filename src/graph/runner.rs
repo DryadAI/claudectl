@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -63,8 +63,7 @@ impl RunReport {
 
 pub fn run(compiled: &CompiledGraph) -> io::Result<RunReport> {
     let base = std::env::current_dir()?.join(".claudectl-runs");
-    let providers = ProviderRegistry::new();
-    run_with_registry(compiled, &providers, &base)
+    run_with_base(compiled, &base)
 }
 
 fn run_with_base(compiled: &CompiledGraph, base: &Path) -> io::Result<RunReport> {
