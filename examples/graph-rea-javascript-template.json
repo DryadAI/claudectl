@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "id": "rea-javascript-analysis-template",
+  "goal": "Inspect a local JavaScript or Electron application and preserve REA evidence for downstream build work.",
+  "policy": {
+    "allow_network": false,
+    "allow_git_push": false,
+    "max_attempts_per_node": 1
+  },
+  "nodes": [
+    {
+      "id": "inspect_reference",
+      "kind": "tool",
+      "description": "Analyze a local extracted JavaScript/Electron application or ASAR using REA.",
+      "requires": [
+        "reverse.javascript.analyze"
+      ],
+      "authority": {
+        "filesystem_read": [
+          "/absolute/path/to/app/**"
+        ]
+      },
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "evidence",
+          "type": "ReverseEngineeringEvidence"
+        }
+      ],
+      "executor": {
+        "kind": "provider",
+        "capability": "reverse.javascript.analyze",
+        "provider": "rea",
+        "request": {
+          "target": "/absolute/path/to/app"
+        }
+      }
+    }
+  ],
+  "edges": []
+}
