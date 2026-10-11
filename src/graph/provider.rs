@@ -1,3 +1,7 @@
+use std::path::Path;
+
+use serde_json::Value;
+
 use super::schema::{NodeSpec, Outcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +19,7 @@ pub struct ProviderResult {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub message: Option<String>,
+    pub artifacts: Vec<String>,
 }
 
 impl ProviderResult {
@@ -25,6 +30,7 @@ impl ProviderResult {
             stdout: None,
             stderr: None,
             message: Some(message.into()),
+            artifacts: Vec::new(),
         }
     }
 
@@ -35,8 +41,14 @@ impl ProviderResult {
             stdout: None,
             stderr: None,
             message: Some(message.into()),
+            artifacts: Vec::new(),
         }
     }
+}
+
+pub struct ProviderContext<'a> {
+    pub run_dir: &'a Path,
+    pub attempt: u32,
 }
 
 /// Runtime adapter for an external capability provider.
@@ -48,7 +60,13 @@ impl ProviderResult {
 pub trait Provider {
     fn name(&self) -> &str;
     fn supports(&self, capability: &str) -> bool;
-    fn execute(&self, node: &NodeSpec, capability: &str) -> Result<ProviderResult, String>;
+    fn execute(
+        &self,
+        node: &NodeSpec,
+        capability: &str,
+        request: &Value,
+        context: &ProviderContext<'_>,
+    ) -> Result<ProviderResult, String>;
 }
 
 #[derive(Default)]
@@ -80,6 +98,9 @@ impl<'a> ProviderRegistry<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::schema::{
+        Authority, ExecutorSpec, NodeKind, RetryPolicy, RiskLevel,
+    };
 
     struct Stub;
 
@@ -92,7 +113,13 @@ mod tests {
             capability == "example.inspect"
         }
 
-        fn execute(&self, _node: &NodeSpec, _capability: &str) -> Result<ProviderResult, String> {
+        fn execute(
+            &self,
+            _node: &NodeSpec,
+            _capability: &str,
+            _request: &Value,
+            _context: &ProviderContext<'_>,
+        ) -> Result<ProviderResult, String> {
             Ok(ProviderResult::pass_observed("ok"))
         }
     }
@@ -121,5 +148,30 @@ mod tests {
                 .resolve(&["example.inspect".into()], Some("other"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn provider_request_remains_runtime_data() {
+        let node = NodeSpec {
+            id: "inspect".into(),
+            kind: NodeKind::Tool,
+            description: None,
+            requires: vec!["example.inspect".into()],
+            authority: Authority::default(),
+            risk: RiskLevel::Low,
+            retry: RetryPolicy::default(),
+            inputs: vec![],
+            outputs: vec![],
+            executor: Some(ExecutorSpec::Provider {
+                capability: "example.inspect".into(),
+                provider: Some("stub".into()),
+                request: serde_json::json!({"target": "/tmp/example"}),
+            }),
+        };
+        let request = match &node.executor {
+            Some(ExecutorSpec::Provider { request, .. }) => request,
+            _ => panic!("provider executor"),
+        };
+        assert_eq!(request["target"], "/tmp/example");
     }
 }
