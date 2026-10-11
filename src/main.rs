@@ -26,6 +26,7 @@ mod config;
 #[cfg(feature = "coord")]
 mod coord;
 mod doctor;
+mod graph;
 #[cfg(feature = "hive")]
 mod hive;
 #[cfg(feature = "coord")]
@@ -60,6 +61,11 @@ pub(crate) struct ViewFilters {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Graph validation, planning, and seed execution
+    Graph {
+        #[command(subcommand)]
+        command: graph::GraphCommand,
+    },
     #[cfg(feature = "relay")]
     /// Relay: peer-to-peer connections, delegation, and discovery
     Relay {
@@ -852,6 +858,7 @@ fn run_main(cli: Cli) -> io::Result<()> {
 
     if let Some(ref command) = cli.command {
         match command {
+            Command::Graph { command } => return graph::dispatch(command, cli.json),
             #[cfg(feature = "relay")]
             Command::Relay { command } => return relay::cli::dispatch_command(command, cli.json),
 
