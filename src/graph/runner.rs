@@ -8,6 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::compiler::CompiledGraph;
+use super::provider::{ProviderConfidence, ProviderRegistry};
 use super::schema::{Authority, ExecutorSpec, NodeKind, NodeSpec, Outcome};
 
 const OUTPUT_MAX_BYTES: usize = 64 * 1024;
@@ -62,10 +63,20 @@ impl RunReport {
 
 pub fn run(compiled: &CompiledGraph) -> io::Result<RunReport> {
     let base = std::env::current_dir()?.join(".claudectl-runs");
-    run_with_base(compiled, &base)
+    let providers = ProviderRegistry::new();
+    run_with_registry(compiled, &providers, &base)
 }
 
 fn run_with_base(compiled: &CompiledGraph, base: &Path) -> io::Result<RunReport> {
+    let providers = ProviderRegistry::new();
+    run_with_registry(compiled, &providers, base)
+}
+
+fn run_with_registry(
+    compiled: &CompiledGraph,
+    providers: &ProviderRegistry<'_>,
+    base: &Path,
+) -> io::Result<RunReport> {
     let run_dir = create_run_dir(base)?;
     let evidence_path = run_dir.join("evidence.jsonl");
     let mut results: BTreeMap<String, NodeExecution> = BTreeMap::new();
@@ -111,43 +122,13 @@ fn run_with_base(compiled: &CompiledGraph, base: &Path) -> io::Result<RunReport>
                 continue;
             }
 
-            let unsupported = unsupported_capabilities(node);
-            if !unsupported.is_empty() {
-                let evidence = EvidenceRecord {
-                    node_id: node.id.clone(),
-                    attempt: 0,
-                    outcome: Outcome::Unknown,
-                    confidence: EvidenceConfidence::Unknown,
-                    started_at_ms: now_epoch_ms(),
-                    duration_ms: 0,
-                    declared_authority: node.authority.clone(),
-                    command: None,
-                    exit_code: None,
-                    stdout: None,
-                    stderr: None,
-                    message: Some(format!(
-                        "seed runner has no provider for capabilities: {}",
-                        unsupported.join(", ")
-                    )),
-                };
-                append_evidence(&evidence_path, &evidence)?;
-                results.insert(
-                    node.id.clone(),
-                    NodeExecution {
-                        outcome: Outcome::Unknown,
-                        attempts: 0,
-                        evidence: vec![evidence],
-                    },
-                );
-                continue;
-            }
-
             let mut records = Vec::new();
             let mut final_outcome = Outcome::Error;
             let max_attempts = node.retry.max_attempts;
 
             for attempt in 1..=max_attempts {
-                let record = execute_once(node, &compiled.fingerprint, attempt)?;
+                let record =
+                    execute_once(node, &compiled.fingerprint, attempt, providers)?;
                 final_outcome = record.outcome;
                 append_evidence(&evidence_path, &record)?;
                 records.push(record);
@@ -198,23 +179,29 @@ fn first_non_passing_dependency(
         .cloned()
 }
 
-fn unsupported_capabilities(node: &NodeSpec) -> Vec<String> {
-    let mut seed = BTreeSet::new();
-    seed.insert("shell.execute");
-    seed.insert("human.approval");
-
-    node.requires
-        .iter()
-        .filter(|cap| !seed.contains(cap.as_str()))
-        .cloned()
-        .collect()
-}
-
-fn execute_once(node: &NodeSpec, fingerprint: &str, attempt: u32) -> io::Result<EvidenceRecord> {
+fn execute_once(
+    node: &NodeSpec,
+    fingerprint: &str,
+    attempt: u32,
+    providers: &ProviderRegistry<'_>,
+) -> io::Result<EvidenceRecord> {
     let started_at_ms = now_epoch_ms();
     let started = Instant::now();
 
     if node.kind == NodeKind::Approval {
+        if node
+            .requires
+            .iter()
+            .any(|capability| capability != "human.approval")
+        {
+            return Ok(unknown_evidence(
+                node,
+                attempt,
+                started_at_ms,
+                started.elapsed().as_millis(),
+                "approval node requires capabilities unavailable to the seed runner".into(),
+            ));
+        }
         let approved = prompt_for_approval(node, fingerprint)?;
         return Ok(EvidenceRecord {
             node_id: node.id.clone(),
@@ -242,6 +229,20 @@ fn execute_once(node: &NodeSpec, fingerprint: &str, attempt: u32) -> io::Result<
 
     match node.executor.as_ref() {
         Some(ExecutorSpec::Shell { command, cwd }) => {
+            if node
+                .requires
+                .iter()
+                .any(|capability| capability != "shell.execute")
+            {
+                return Ok(unknown_evidence(
+                    node,
+                    attempt,
+                    started_at_ms,
+                    started.elapsed().as_millis(),
+                    "shell node requires capabilities unavailable to the seed runner".into(),
+                ));
+            }
+
             let mut process = shell_command(command);
             if let Some(cwd) = cwd {
                 process.current_dir(cwd);
@@ -287,23 +288,62 @@ fn execute_once(node: &NodeSpec, fingerprint: &str, attempt: u32) -> io::Result<
         Some(ExecutorSpec::Provider {
             capability,
             provider,
-        }) => Ok(EvidenceRecord {
-            node_id: node.id.clone(),
-            attempt,
-            outcome: Outcome::Unknown,
-            confidence: EvidenceConfidence::Unknown,
-            started_at_ms,
-            duration_ms: started.elapsed().as_millis(),
-            declared_authority: node.authority.clone(),
-            command: None,
-            exit_code: None,
-            stdout: None,
-            stderr: None,
-            message: Some(format!(
-                "provider executor is not registered in the seed runner (capability='{capability}', provider='{}')",
-                provider.as_deref().unwrap_or("auto")
-            )),
-        }),
+        }) => {
+            let Some(runtime_provider) =
+                providers.resolve(&node.requires, provider.as_deref())
+            else {
+                return Ok(unknown_evidence(
+                    node,
+                    attempt,
+                    started_at_ms,
+                    started.elapsed().as_millis(),
+                    format!(
+                        "no provider satisfies capabilities [{}] with preference '{}'",
+                        node.requires.join(", "),
+                        provider.as_deref().unwrap_or("auto")
+                    ),
+                ));
+            };
+
+            match runtime_provider.execute(node, capability) {
+                Ok(result) => Ok(EvidenceRecord {
+                    node_id: node.id.clone(),
+                    attempt,
+                    outcome: result.outcome,
+                    confidence: match result.confidence {
+                        ProviderConfidence::Observed => EvidenceConfidence::Observed,
+                        ProviderConfidence::Derived => EvidenceConfidence::Derived,
+                        ProviderConfidence::Inferred => EvidenceConfidence::Inferred,
+                        ProviderConfidence::Unknown => EvidenceConfidence::Unknown,
+                    },
+                    started_at_ms,
+                    duration_ms: started.elapsed().as_millis(),
+                    declared_authority: node.authority.clone(),
+                    command: None,
+                    exit_code: None,
+                    stdout: result.stdout.map(|output| truncate_output(&output)),
+                    stderr: result.stderr.map(|output| truncate_output(&output)),
+                    message: result.message,
+                }),
+                Err(err) => Ok(EvidenceRecord {
+                    node_id: node.id.clone(),
+                    attempt,
+                    outcome: Outcome::Error,
+                    confidence: EvidenceConfidence::Unknown,
+                    started_at_ms,
+                    duration_ms: started.elapsed().as_millis(),
+                    declared_authority: node.authority.clone(),
+                    command: None,
+                    exit_code: None,
+                    stdout: None,
+                    stderr: None,
+                    message: Some(format!(
+                        "provider '{}' failed: {err}",
+                        runtime_provider.name()
+                    )),
+                }),
+            }
+        },
         None => Ok(EvidenceRecord {
             node_id: node.id.clone(),
             attempt,
@@ -318,6 +358,29 @@ fn execute_once(node: &NodeSpec, fingerprint: &str, attempt: u32) -> io::Result<
             stderr: None,
             message: Some("node has no executable provider".into()),
         }),
+    }
+}
+
+fn unknown_evidence(
+    node: &NodeSpec,
+    attempt: u32,
+    started_at_ms: u128,
+    duration_ms: u128,
+    message: String,
+) -> EvidenceRecord {
+    EvidenceRecord {
+        node_id: node.id.clone(),
+        attempt,
+        outcome: Outcome::Unknown,
+        confidence: EvidenceConfidence::Unknown,
+        started_at_ms,
+        duration_ms,
+        declared_authority: node.authority.clone(),
+        command: None,
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        message: Some(message),
     }
 }
 
@@ -394,6 +457,7 @@ fn shell_command(command: &str) -> Command {
 mod tests {
     use super::*;
     use crate::graph::compiler;
+    use crate::graph::provider::{Provider, ProviderResult};
     use crate::graph::schema::{
         EdgeEndpoint, EdgeSpec, GraphPolicy, GraphSpec, RetryPolicy, RiskLevel,
     };
@@ -422,6 +486,39 @@ mod tests {
             edges: vec![],
         })
         .unwrap()
+    }
+
+    struct ReaStub;
+
+    impl Provider for ReaStub {
+        fn name(&self) -> &str {
+            "rea"
+        }
+
+        fn supports(&self, capability: &str) -> bool {
+            capability == "rea.binary.inspect"
+        }
+
+        fn execute(
+            &self,
+            _node: &NodeSpec,
+            _capability: &str,
+        ) -> Result<ProviderResult, String> {
+            Ok(ProviderResult::pass_observed("REA observation captured"))
+        }
+    }
+
+    #[test]
+    fn registered_provider_can_satisfy_capability() {
+        let graph = provider_graph();
+        let provider = ReaStub;
+        let mut registry = ProviderRegistry::new();
+        registry.register(&provider);
+        let dir = tempfile::tempdir().unwrap();
+        let report = run_with_registry(&graph, &registry, dir.path()).unwrap();
+
+        assert_eq!(report.nodes["inspect"].outcome, Outcome::Pass);
+        assert!(report.succeeded());
     }
 
     #[test]
