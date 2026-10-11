@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
@@ -46,6 +47,7 @@ impl Provider for ReaCliProvider {
         match capability {
             CAP_JAVASCRIPT_ANALYZE => {
                 let target = required_string(request, "target")?;
+                authorize_read_target(node, target)?;
                 command
                     .arg("analyze-javascript-application")
                     .arg(target)
@@ -53,6 +55,7 @@ impl Provider for ReaCliProvider {
             }
             CAP_NATIVE_ANALYZE => {
                 let target = required_string(request, "target")?;
+                authorize_read_target(node, target)?;
                 command.arg("analyze").arg(target);
                 if let Some(provider_id) = request.get("provider_id").and_then(Value::as_str) {
                     command.arg("--provider").arg(provider_id);
@@ -123,6 +126,37 @@ impl Provider for ReaCliProvider {
     }
 }
 
+fn authorize_read_target(node: &NodeSpec, target: &str) -> Result<(), String> {
+    let target = std::fs::canonicalize(target)
+        .map_err(|e| format!("resolve REA target '{target}': {e}"))?;
+
+    for rule in &node.authority.filesystem_read {
+        if let Some(prefix) = rule.strip_suffix("/**") {
+            if canonical_prefix(prefix)
+                .is_some_and(|allowed| target.starts_with(allowed))
+            {
+                return Ok(());
+            }
+        } else if std::fs::canonicalize(rule)
+            .is_ok_and(|allowed| allowed == target)
+        {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "REA target '{}' is outside declared filesystem_read authority",
+        target.display()
+    ))
+}
+
+fn canonical_prefix(value: &str) -> Option<PathBuf> {
+    if value.is_empty() {
+        return Some(Path::new("/").to_path_buf());
+    }
+    std::fs::canonicalize(value).ok()
+}
+
 fn required_string<'a>(request: &'a Value, key: &str) -> Result<&'a str, String> {
     request
         .get(key)
@@ -167,6 +201,31 @@ mod tests {
             required_string(&serde_json::json!({"target": "/tmp/app"}), "target").unwrap(),
             "/tmp/app"
         );
+    }
+
+    #[test]
+    fn target_must_be_inside_declared_read_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app");
+        std::fs::create_dir_all(&app).unwrap();
+
+        let mut node = NodeSpec {
+            id: "inspect".into(),
+            kind: super::super::schema::NodeKind::Tool,
+            description: None,
+            requires: vec![CAP_JAVASCRIPT_ANALYZE.into()],
+            authority: super::super::schema::Authority::default(),
+            risk: super::super::schema::RiskLevel::Low,
+            retry: super::super::schema::RetryPolicy::default(),
+            inputs: vec![],
+            outputs: vec![],
+            executor: None,
+        };
+
+        assert!(authorize_read_target(&node, app.to_str().unwrap()).is_err());
+
+        node.authority.filesystem_read = vec![format!("{}/**", dir.path().display())];
+        assert!(authorize_read_target(&node, app.to_str().unwrap()).is_ok());
     }
 
     #[test]
