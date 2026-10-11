@@ -551,6 +551,7 @@ mod tests {
             executor: Some(ExecutorSpec::Provider {
                 capability: "rea.binary.inspect".into(),
                 provider: Some("rea".into()),
+                request: serde_json::Value::Null,
             }),
         };
         let err = compile(graph(vec![provider], vec![])).unwrap_err();
