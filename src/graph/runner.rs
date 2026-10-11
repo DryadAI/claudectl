@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::compiler::CompiledGraph;
-use super::provider::{ProviderConfidence, ProviderRegistry};
+use super::provider::{ProviderConfidence, ProviderContext, ProviderRegistry};
 use super::schema::{Authority, ExecutorSpec, NodeKind, NodeSpec, Outcome};
 
 const OUTPUT_MAX_BYTES: usize = 64 * 1024;
@@ -36,6 +36,8 @@ pub struct EvidenceRecord {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub message: Option<String>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +110,7 @@ fn run_with_registry(
                     message: Some(format!(
                         "not executed because dependency '{blocker}' did not PASS"
                     )),
+                    artifacts: Vec::new(),
                 };
                 append_evidence(&evidence_path, &evidence)?;
                 results.insert(
@@ -127,7 +130,13 @@ fn run_with_registry(
 
             for attempt in 1..=max_attempts {
                 let record =
-                    execute_once(node, &compiled.fingerprint, attempt, providers)?;
+                    execute_once(
+                        node,
+                        &compiled.fingerprint,
+                        attempt,
+                        providers,
+                        &run_dir,
+                    )?;
                 final_outcome = record.outcome;
                 append_evidence(&evidence_path, &record)?;
                 records.push(record);
@@ -183,6 +192,7 @@ fn execute_once(
     fingerprint: &str,
     attempt: u32,
     providers: &ProviderRegistry<'_>,
+    base_run_dir: &Path,
 ) -> io::Result<EvidenceRecord> {
     let started_at_ms = now_epoch_ms();
     let started = Instant::now();
@@ -223,6 +233,7 @@ fn execute_once(
             } else {
                 format!("human rejected exact plan {fingerprint}")
             }),
+            artifacts: Vec::new(),
         });
     }
 
@@ -266,6 +277,7 @@ fn execute_once(
                         stdout: Some(truncate_output(&String::from_utf8_lossy(&output.stdout))),
                         stderr: Some(truncate_output(&String::from_utf8_lossy(&output.stderr))),
                         message: None,
+                        artifacts: Vec::new(),
                     })
                 }
                 Err(err) => Ok(EvidenceRecord {
@@ -281,12 +293,14 @@ fn execute_once(
                     stdout: None,
                     stderr: None,
                     message: Some(format!("failed to start shell command: {err}")),
+                    artifacts: Vec::new(),
                 }),
             }
         }
         Some(ExecutorSpec::Provider {
             capability,
             provider,
+            request,
         }) => {
             let Some(runtime_provider) =
                 providers.resolve(&node.requires, provider.as_deref())
@@ -304,7 +318,11 @@ fn execute_once(
                 ));
             };
 
-            match runtime_provider.execute(node, capability) {
+            let context = ProviderContext {
+                run_dir: base_run_dir,
+                attempt,
+            };
+            match runtime_provider.execute(node, capability, request, &context) {
                 Ok(result) => Ok(EvidenceRecord {
                     node_id: node.id.clone(),
                     attempt,
@@ -323,6 +341,7 @@ fn execute_once(
                     stdout: result.stdout.map(|output| truncate_output(&output)),
                     stderr: result.stderr.map(|output| truncate_output(&output)),
                     message: result.message,
+                    artifacts: result.artifacts,
                 }),
                 Err(err) => Ok(EvidenceRecord {
                     node_id: node.id.clone(),
@@ -340,6 +359,7 @@ fn execute_once(
                         "provider '{}' failed: {err}",
                         runtime_provider.name()
                     )),
+                    artifacts: Vec::new(),
                 }),
             }
         },
@@ -356,6 +376,7 @@ fn execute_once(
             stdout: None,
             stderr: None,
             message: Some("node has no executable provider".into()),
+            artifacts: Vec::new(),
         }),
     }
 }
@@ -380,6 +401,7 @@ fn unknown_evidence(
         stdout: None,
         stderr: None,
         message: Some(message),
+        artifacts: Vec::new(),
     }
 }
 
@@ -456,7 +478,7 @@ fn shell_command(command: &str) -> Command {
 mod tests {
     use super::*;
     use crate::graph::compiler;
-    use crate::graph::provider::{Provider, ProviderResult};
+    use crate::graph::provider::{Provider, ProviderContext, ProviderResult};
     use crate::graph::schema::{
         EdgeEndpoint, EdgeSpec, GraphPolicy, GraphSpec, RetryPolicy, RiskLevel,
     };
@@ -480,6 +502,7 @@ mod tests {
                 executor: Some(ExecutorSpec::Provider {
                     capability: "rea.binary.inspect".into(),
                     provider: Some("rea".into()),
+                    request: serde_json::json!({"target": "/tmp/example"}),
                 }),
             }],
             edges: vec![],
@@ -502,6 +525,8 @@ mod tests {
             &self,
             _node: &NodeSpec,
             _capability: &str,
+            _request: &serde_json::Value,
+            _context: &ProviderContext<'_>,
         ) -> Result<ProviderResult, String> {
             Ok(ProviderResult::pass_observed("REA observation captured"))
         }
@@ -584,6 +609,7 @@ mod tests {
             executor: Some(ExecutorSpec::Provider {
                 capability: "other".into(),
                 provider: None,
+                request: serde_json::Value::Null,
             }),
         });
         graph.spec.edges.push(EdgeSpec {
