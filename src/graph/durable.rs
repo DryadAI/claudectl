@@ -205,6 +205,20 @@ fn submit_with_connection(
 
     for node in &compiled.spec.nodes {
         let request = agent_request(node)?;
+        let source_cwd = std::fs::canonicalize(&request.cwd).map_err(|e| {
+            format!(
+                "agent node '{}' cannot resolve request.cwd '{}': {e}",
+                node.id, request.cwd
+            )
+        })?;
+        if !source_cwd.is_dir() {
+            return Err(format!(
+                "agent node '{}' request.cwd is not a directory: {}",
+                node.id,
+                source_cwd.display()
+            ));
+        }
+
         let dependency_ids = compiled
             .dependencies
             .get(&node.id)
@@ -221,7 +235,7 @@ fn submit_with_connection(
         let task = NewTask {
             name: format!("{}:{}", compiled.spec.id, node.id),
             role: request.role,
-            cwd: request.cwd,
+            cwd: source_cwd.to_string_lossy().to_string(),
             prompt: request.prompt,
             model: request.model,
             budget_usd: request.budget_usd,
@@ -330,20 +344,23 @@ fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
             ));
         }
 
-        if !node.authority.filesystem_write.is_empty() {
-            if node.workspace.mode != WorkspaceMode::Worktree {
+        if node.workspace.mode != WorkspaceMode::Worktree {
+            return Err(format!(
+                "durable supervisor V1 requires workspace.mode='worktree' for agent node '{}'",
+                node.id
+            ));
+        }
+        for path in node
+            .authority
+            .filesystem_read
+            .iter()
+            .chain(node.authority.filesystem_write.iter())
+        {
+            if std::path::Path::new(path).is_absolute() {
                 return Err(format!(
-                    "durable writable agent node '{}' must use workspace.mode='worktree'",
-                    node.id
+                    "durable agent node '{}' has absolute filesystem authority '{}'; V1 worktree scopes must be relative",
+                    node.id, path
                 ));
-            }
-            for path in &node.authority.filesystem_write {
-                if std::path::Path::new(path).is_absolute() {
-                    return Err(format!(
-                        "durable writable agent node '{}' has absolute write authority '{}'; worktree write scopes must be relative",
-                        node.id, path
-                    ));
-                }
             }
         }
     }
@@ -391,7 +408,9 @@ mod tests {
             description: None,
             requires: vec![AGENT_EXECUTE_CAPABILITY.into()],
             authority: Authority::default(),
-            workspace: Default::default(),
+            workspace: crate::graph::schema::WorkspaceSpec {
+                mode: WorkspaceMode::Worktree,
+            },
             risk: RiskLevel::Reversible,
             retry: RetryPolicy { max_attempts: 2 },
             inputs: vec![],
@@ -400,7 +419,7 @@ mod tests {
                 capability: AGENT_EXECUTE_CAPABILITY.into(),
                 provider: Some("claude_code".into()),
                 request: serde_json::json!({
-                    "cwd": "/work/project",
+                    "cwd": ".",
                     "prompt": format!("implement {id}"),
                     "verify": [{"kind": "run", "command": "cargo test"}]
                 }),
@@ -506,7 +525,7 @@ mod tests {
         let mut node = agent("direct");
         if let Some(ExecutorSpec::Provider { request, .. }) = node.executor.as_mut() {
             *request = serde_json::json!({
-                "cwd": "/work/project",
+                "cwd": ".",
                 "prompt": "inspect",
                 "role": "backend"
             });
@@ -528,7 +547,7 @@ mod tests {
         let mut node = agent("model");
         if let Some(ExecutorSpec::Provider { request, .. }) = node.executor.as_mut() {
             *request = serde_json::json!({
-                "cwd": "/work/project",
+                "cwd": ".",
                 "prompt": "inspect",
                 "model": "sonnet"
             });
@@ -551,6 +570,7 @@ mod tests {
     #[test]
     fn durable_writable_agents_require_worktree_and_relative_scope() {
         let mut node = agent("writer");
+        node.workspace.mode = WorkspaceMode::Shared;
         node.authority.filesystem_write = vec!["src/**".into()];
         let compiled = compiler::compile(GraphSpec {
             version: 1,
