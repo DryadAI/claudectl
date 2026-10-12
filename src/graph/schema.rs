@@ -51,6 +51,8 @@ pub struct NodeSpec {
     #[serde(default)]
     pub authority: Authority,
     #[serde(default)]
+    pub workspace: WorkspaceSpec,
+    #[serde(default)]
     pub risk: RiskLevel,
     #[serde(default)]
     pub retry: RetryPolicy,
@@ -88,6 +90,29 @@ pub enum ExecutorSpec {
         #[serde(default)]
         request: serde_json::Value,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSpec {
+    #[serde(default)]
+    pub mode: WorkspaceMode,
+}
+
+impl Default for WorkspaceSpec {
+    fn default() -> Self {
+        Self {
+            mode: WorkspaceMode::Shared,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    #[default]
+    Shared,
+    Worktree,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
