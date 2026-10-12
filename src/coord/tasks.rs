@@ -638,6 +638,23 @@ mod tests {
     }
 
     #[test]
+    fn graph_task_identity_round_trips() {
+        let conn = open_memory_for_tests();
+        insert_task_with_identity(
+            &conn,
+            "task_graph_1",
+            Some("graph_run_1"),
+            Some("node_a"),
+            &sample(),
+        )
+        .unwrap();
+
+        let got = get_task(&conn, "task_graph_1").unwrap().unwrap();
+        assert_eq!(got.graph_run_id.as_deref(), Some("graph_run_1"));
+        assert_eq!(got.graph_node_id.as_deref(), Some("node_a"));
+    }
+
+    #[test]
     fn latest_verification_returns_newest_across_attempts() {
         let conn = open_memory_for_tests();
         let id = insert_task(&conn, &sample()).unwrap();
