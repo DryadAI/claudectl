@@ -1,87 +1,225 @@
 # Graph Bootstrap V1
 
-This is an intentionally narrow seed runner for `claudectl`. It is not a production-safe sandbox or a fully durable graph orchestrator.
+The graph layer now has two execution paths over one canonical, framework-independent JSON IR:
 
-## Commands
+- **local seed/provider runtime** for deterministic commands, checks, approvals, and providers such as REA;
+- **durable supervisor runtime** for Claude Code agent DAGs that need dependency ordering, retries, verifier evidence, restart-safe state, and isolated workspaces.
+
+This is still a draft bootstrap. Mixed durable graphs, automatic integration/merge, graph timeouts, and cryptographic plan binding are not implemented yet.
+
+## Operator flow
+
+Refresh the current hook/plugin assets and DB migrations after installing this branch:
+
+```sh
+claudectl init upgrade
+```
+
+Run the existing headless control loop in one terminal:
+
+```sh
+claudectl --headless
+```
+
+Then submit and inspect a durable graph from another terminal:
+
+```sh
+claudectl graph validate examples/graph-durable-worktree-smoke.json
+claudectl graph plan examples/graph-durable-worktree-smoke.json
+claudectl graph submit examples/graph-durable-worktree-smoke.json
+
+# use the graph_run_id printed by submit
+claudectl graph status <graph-run-id>
+```
+
+A read-only two-node dependency example is also available:
+
+```sh
+claudectl graph submit examples/graph-durable-agent-smoke.json
+```
+
+The source repository must be a **clean Git checkout**, and durable V1 requires each agent request's `cwd` to resolve to the repository root.
+
+## Local seed/provider runtime
 
 ```sh
 claudectl graph validate examples/graph-bootstrap-v1.json
 claudectl graph plan examples/graph-bootstrap-v1.json
 claudectl graph run examples/graph-bootstrap-v1.json
-
-# Durable Claude Code agent DAG (requires the coord/supervisor feature)
-claudectl graph submit examples/graph-durable-agent-smoke.json
-claudectl graph status <graph-run-id>
 ```
 
-`--json` works with the graph subcommands. Run evidence is written under `.claudectl-runs/graph-*/`.
+The local runner supports shell/check nodes, bounded retries, interactive approval, provider nodes, evidence JSONL, and PASS / FAIL / UNKNOWN / ERROR outcomes. It executes topological waves synchronously and does not have crash-safe resume.
 
-REA provider smoke test (safe discovery only):
+REA is registered as a runtime provider for:
+
+- `reverse.capabilities.discover`
+- `reverse.javascript.analyze`
+- `reverse.native.analyze`
+
+Safe provider discovery:
 
 ```sh
 claudectl graph run examples/graph-rea-capabilities.json
 ```
 
-If `rea` is unavailable, the node returns `UNKNOWN`, never `PASS`. When REA is installed, its full `--json` output is streamed to a run artifact rather than embedded into the JSONL evidence log.
+When REA is installed, its full JSON result is streamed to a run artifact. Missing REA returns `UNKNOWN`, never a fabricated `PASS`. REA target paths must be covered by the node's declared read authority.
 
-For authorized local JavaScript/Electron analysis, copy and edit `examples/graph-rea-javascript-template.json` so `target` and declared read authority match the application you are permitted to inspect.
+## Durable supervisor contract
 
-## Contracts
-
-- Canonical versioned JSON, independent of graph frameworks.
-- Dependency-only edges and typed-port edges.
-- Deterministic topological waves; the local seed runner executes waves sequentially.
-- Durable agent graphs compile node ids to preallocated supervisor task ids, and dependency edges are stored as those task ids.
-- Supervisor PENDING tasks wait until every dependency task is DONE; missing or unsuccessful terminal dependencies escalate to NEEDS_HUMAN.
-- Bounded retries; PASS, FAIL, UNKNOWN, ERROR outcomes.
-- Missing providers return UNKNOWN, never PASS.
-- REA is a runtime capability provider for `reverse.capabilities.discover`, `reverse.javascript.analyze`, and `reverse.native.analyze`; the canonical graph remains provider-independent.
-- Interactive approval uses a stable *non-cryptographic* graph fingerprint. It is **not** authorization to merge, deploy, or push.
-- Shell commands run on the host with the caller's permissions. Declared filesystem/network/git authority is **not yet enforced at runtime**. Graph policy is currently a preflight declaration check only. Run only trusted graph files.
-- The local seed runner has no crash-safe resume or timeout enforcement.
-- Durable Claude Code agent nodes use the existing supervisor ledger/reconciler and survive process restart, but mixed durable graphs (shell/tool/approval + agent) are intentionally rejected in V1.
-- No sandbox or Git worktree isolation yet; declared authority is persisted into task policy but is not yet enforced for Claude Code agent execution.
-- No typed runtime artifact transfer or plan/environment cryptographic digest yet.
-
-## Next hardening milestones
-
-1. Enforce graph-declared filesystem/network/git authority for durable Claude Code agents, preferably through per-node worktrees/containers.
-2. Add bounded command/agent timeouts and explicit cancellation to the graph-facing contract.
-3. Add runtime typed artifact passing, node output verification, and provenance.
-4. Teach the graph runtime to reconcile mixed graphs while continuing to delegate agent durability to the existing supervisor.
-5. Expand REA capability adapters only where its CLI contracts are stable, and validate provider request schemas per capability.
-6. Introduce a cryptographic digest binding graph, repo state, policy, and intended side effects before consequential approval.
-7. Implement the interview UI on top of the same graph core.
-
-## Safety
-
-The bootstrap graph runs only local checks (Cargo commands). The REA examples are separate and opt-in. Use reverse-engineering capabilities only for targets you own, are authorized to inspect, or are otherwise permitted to analyze. The graph layer does not bypass authentication, DRM, licensing controls, or access restrictions. Nothing in these examples deploys, pushes, or merges.
-
-
-## Durable supervisor bridge
-
-`claudectl graph submit` is intentionally narrower than `graph run` in V1. It accepts only `agent` nodes whose provider capability is `agent.execute` and whose preferred provider is either omitted or `claude_code`.
+`graph submit` is intentionally narrower than `graph run` in V1. It accepts only `agent` nodes using capability `agent.execute`, with provider omitted or set to `claude_code`.
 
 Submission is atomic:
 
-1. A `graph_runs` row receives a run-scoped id and graph fingerprint.
-2. Every node receives a preallocated durable supervisor task id.
-3. Edges are rewritten from graph node ids to those task ids.
-4. All task rows are inserted in one SQLite transaction with `graph_run_id` and `graph_node_id`.
-5. The existing supervisor reconciler releases a task only after all dependency task ids reach `DONE`.
-6. Every task transition refreshes the parent graph-run state transactionally.
+1. A `graph_runs` row receives a run-scoped ID and graph fingerprint.
+2. Every node receives a preallocated durable supervisor task ID.
+3. Dependency edges are rewritten from graph node IDs to those durable task IDs.
+4. Tasks are inserted with `graph_run_id` and `graph_node_id` in one SQLite transaction.
+5. The supervisor releases a PENDING task only after all dependency task IDs reach `DONE`.
+6. Missing, `CANCELLED`, or `NEEDS_HUMAN` dependencies fail closed to operator escalation.
+7. Task transitions refresh the parent graph-run state transactionally.
 
-Human-authored supervisor TOML keeps using dependency names for ergonomics, but the CLI resolves those names to preallocated task ids before insertion. The ledger never relies on global task-name matching.
+Human-authored supervisor TOML may still use dependency names; the CLI resolves them to preallocated task IDs before insertion. The ledger itself never relies on global task-name matching.
 
+## Durable worktree isolation
+
+All durable V1 agents require:
+
+```json
+"workspace": { "mode": "worktree" }
+```
+
+The actuator materializes a stable per-node worktree under:
+
+```text
+~/.claudectl/worktrees/<repo-hash>/<graph-run>/<node>/
+```
+
+Properties:
+
+- a new workspace is created from the source repository's exact `HEAD`;
+- the source repository must be clean before first materialization;
+- retries and daemon restarts reuse the same worktree;
+- the selected workspace path is persisted on the supervisor task;
+- the worktree `HEAD` is recorded on each task attempt as execution evidence;
+- verifiers execute in the materialized worktree, not the shared source checkout;
+- worktrees are intentionally retained after completion for inspection/evidence; automatic cleanup is not implemented yet.
+
+## Durable authority enforcement
+
+Before Claude launches, the actuator writes a workspace-scoped graph policy. After discovery, the same policy is also bound to the real Claude session ID.
+
+The installed Claude Code `PreToolUse` hook calls the hidden:
+
+```sh
+claudectl graph authorize-tool
+```
+
+Ordinary non-graph sessions have no graph policy and are unaffected.
+
+Durable graph sessions currently use a deliberately small structured-tool allowlist:
+
+- `Read` — allowed only inside declared `filesystem_read` scopes.
+- `Glob` / `Grep` — allowed only inside declared read scopes.
+- `Write` / `Edit` / `NotebookEdit` — allowed only inside declared `filesystem_write` scopes.
+- `WebFetch` / `WebSearch` — allowed only when node network authority is explicitly `allowed`.
+- `TodoWrite` — allowed.
+- `Bash` — denied for durable V1 agents.
+- unknown tools — denied.
+
+Path checks are worktree-relative and reject lexical escapes and detected symlink escapes outside the worktree.
+
+Because general shell access is disabled, durable V1 also rejects `git_commit=true` or `git_push=true`. Tests/checks belong in deterministic verifiers, where exit codes and output are recorded as evidence.
+
+The durable compiler also rejects options it cannot yet enforce:
+
+- role/mailbox routing,
+- per-node model selection,
+- per-node agent budget,
+- per-node wall-clock timeout.
+
+Accepting an unenforced safety or execution contract would be worse than rejecting it.
+
+## Hooks and completion
+
+`claudectl init upgrade` refreshes both the embedded plugin assets and the direct Claude Code hook entries. Managed hook installation is idempotent: stale claudectl hooks are replaced while unrelated third-party hooks are preserved.
+
+Lifecycle hooks feed `coord.db` through:
+
+```text
+PreToolUse  -> claudectl ingest --hook PreToolUse
+PostToolUse -> claudectl ingest --hook PostToolUse
+SessionStart -> claudectl ingest --hook SessionStart
+Stop        -> claudectl ingest --hook Stop
+```
+
+The supervisor correlates a `Stop` event by the latest attempt's unique Claude session ID and emits `RunVerifier`. This avoids treating a vanished process as proof of success.
+
+Verifier behavior:
+
+- shell verifier exit 0 -> PASS;
+- non-zero exit -> FAIL;
+- verifier backend errors become explicit FAIL evidence rather than leaving the task wedged in `VERIFYING`;
+- a failed verifier moves the task to `RETRYING` while retry budget remains;
+- retry reuses the same isolated worktree and includes the failed verifier output in the next Claude prompt;
+- exhausted retries -> `NEEDS_HUMAN`;
+- all verifiers passing -> `DONE`.
 
 ## Durable outcome mapping
 
-`graph status` maps supervisor state back into the same graph outcome vocabulary used by the seed runner:
+`graph status` maps supervisor state back into the graph outcome vocabulary:
 
-- supervisor `DONE` → graph `PASS`
-- `NEEDS_HUMAN` with a latest verifier verdict of `FAIL` → graph `FAIL`
-- `NEEDS_HUMAN` for other causes → graph `UNKNOWN`
-- `CANCELLED` → graph `ERROR`
-- pending, assigned, running, verifying, retrying, or resuming work → graph `UNKNOWN`
+- `DONE` -> `PASS`
+- `NEEDS_HUMAN` with a latest verifier `FAIL` -> `FAIL`
+- other `NEEDS_HUMAN` -> `UNKNOWN`
+- `CANCELLED` -> `ERROR`
+- pending / assigned / running / verifying / retrying / resuming -> `UNKNOWN`
 
-A durable graph run is `PASS` only when every node is `PASS`. `ERROR` takes precedence over `FAIL`, and any unresolved node keeps the run `UNKNOWN`.
+A durable graph run is `PASS` only when every node is `PASS`.
+
+## Evidence and plan binding
+
+The current graph fingerprint is deterministic FNV-1a and is useful for stale-plan/change detection only. It is **not** a cryptographic authorization digest.
+
+Current durable evidence includes:
+
+- graph/run/node/task identity,
+- dependency task IDs,
+- task transitions,
+- attempts and real Claude session IDs,
+- materialized workspace path,
+- worktree revision at attempt start,
+- verifier commands/verdicts/output,
+- retry history,
+- graph-level state/outcome.
+
+## Current limitations
+
+The most important remaining gaps are:
+
+1. **No Rust build verification in this environment yet.** This branch must pass formatting, check, clippy, and tests before merge.
+2. No automatic fan-in/integration/merge of independent worktrees.
+3. No mixed durable graph where deterministic/REA nodes and supervisor-backed agent nodes share one resumable execution state machine.
+4. No enforced wall-clock cancellation/termination contract.
+5. No automatic worktree cleanup.
+6. No cryptographic plan digest binding graph + repository state + authority + intended side effects.
+7. No Graph Builder interview/UI over this runtime yet.
+
+## Required validation before merge
+
+```sh
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo check --all-targets --no-default-features --features hive
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features --features hive -- -D warnings
+cargo test --all-targets
+cargo test --all-targets --no-default-features --features hive
+```
+
+Keep the PR draft until these pass.
+
+## Safety
+
+REA/reverse-engineering capabilities should only be used for targets the operator owns, is authorized to inspect, or is otherwise permitted to analyze. Nothing in these examples bypasses authentication, DRM, licensing controls, or access restrictions.
+
+The durable worktree smoke graph is deliberately reversible: it writes one marker file inside an isolated worktree, runs a deterministic verifier, and does not commit, push, deploy, or merge.
