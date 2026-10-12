@@ -343,6 +343,12 @@ fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
                 node.id
             ));
         }
+        if node.authority.git_commit || node.authority.git_push {
+            return Err(format!(
+                "durable supervisor V1 disables general Git mutation inside agent sessions; node '{}' must set git_commit=false and git_push=false",
+                node.id
+            ));
+        }
 
         if node.workspace.mode != WorkspaceMode::Worktree {
             return Err(format!(
@@ -565,6 +571,25 @@ mod tests {
         assert!(submit_with_connection(&mut conn, &compiled)
             .unwrap_err()
             .contains("model selection"));
+    }
+
+    #[test]
+    fn durable_v1_rejects_git_mutation_authority() {
+        let mut node = agent("git");
+        node.authority.git_commit = true;
+        let compiled = compiler::compile(GraphSpec {
+            version: 1,
+            id: "git-rejected".into(),
+            goal: None,
+            policy: GraphPolicy::default(),
+            nodes: vec![node],
+            edges: vec![],
+        })
+        .unwrap();
+        let mut conn = store::open_memory();
+        assert!(submit_with_connection(&mut conn, &compiled)
+            .unwrap_err()
+            .contains("git_commit=false"));
     }
 
     #[test]
