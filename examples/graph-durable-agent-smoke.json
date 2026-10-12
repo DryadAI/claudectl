@@ -39,6 +39,9 @@
           "prompt": "Inspect src/graph and report the three highest-risk correctness gaps in the current graph bootstrap implementation. Do not modify files.",
           "verify": []
         }
+      },
+      "workspace": {
+        "mode": "worktree"
       }
     },
     {
@@ -73,6 +76,9 @@
           "prompt": "Inspect the graph-to-supervisor durability bridge and dependency gating. Report correctness risks and missing tests. Do not modify files.",
           "verify": []
         }
+      },
+      "workspace": {
+        "mode": "worktree"
       }
     }
   ],
