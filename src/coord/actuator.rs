@@ -108,7 +108,15 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             } else {
                 cwd.clone()
             };
+            let graph_policy = graph_session_policy(&task, &launch_cwd)?;
+            if let Some(policy) = graph_policy.as_ref() {
+                super::session_policy::write_workspace(&launch_cwd, policy)
+                    .map_err(|e| format!("write graph workspace policy: {e}"))?;
+            }
             let session_id = fx.spawn_session(&launch_cwd, &task.prompt)?;
+            if let Some(policy) = graph_policy.as_ref() {
+                let _ = super::session_policy::write(&session_id, policy);
+            }
             let cwd_hash = if task.graph_run_id.is_some() {
                 Some(super::workspace::workspace_revision(&launch_cwd)?)
             } else {
@@ -170,6 +178,7 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                     TaskState::Done,
                     "no-verifiers",
                 )?;
+                clear_graph_authority(conn, &task, true);
                 maybe_auto_post_pr(task_id);
                 return Ok(());
             }
@@ -221,6 +230,11 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                             _ => "verify-fail",
                         },
                     )?;
+                    clear_graph_authority(
+                        conn,
+                        &task,
+                        next_state == TaskState::NeedsHuman,
+                    );
                     return Ok(());
                 }
                 // PASS path: fall through to the next verifier.
@@ -234,6 +248,7 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 TaskState::Done,
                 "verify-pass",
             )?;
+            clear_graph_authority(conn, &task, true);
             maybe_auto_post_pr(task_id);
             Ok(())
         }
@@ -252,8 +267,16 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             let retry_prompt =
                 retry_prompt_for_fail(&task.prompt, &verifier_kind, &verifier_output);
             let launch_cwd = task_launch_cwd(conn, &task)?;
+            let graph_policy = graph_session_policy(&task, &launch_cwd)?;
+            if let Some(policy) = graph_policy.as_ref() {
+                super::session_policy::write_workspace(&launch_cwd, policy)
+                    .map_err(|e| format!("write graph workspace policy: {e}"))?;
+            }
             let next_num = attempt_count(conn, task_id)? + 1;
             let session_id = fx.spawn_session(&launch_cwd, &retry_prompt)?;
+            if let Some(policy) = graph_policy.as_ref() {
+                let _ = super::session_policy::write(&session_id, policy);
+            }
             let cwd_hash = Some(super::workspace::workspace_revision(&launch_cwd)?);
             let _attempt_id = insert_attempt(
                 conn,
@@ -305,6 +328,7 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 TaskState::Pending,
                 "resume-ready",
             )?;
+            clear_graph_authority(conn, &task, false);
             Ok(())
         }
         Action::EscalateHuman { task_id, cause } => {
@@ -322,6 +346,78 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
         // reconciler can emit them today without the actuator
         // panicking. Implementation lands with the resume protocol.
         Action::WriteSessionPolicy { .. } | Action::ClearSessionPolicy { .. } => Ok(()),
+    }
+}
+
+fn graph_session_policy(
+    task: &TaskRow,
+    workspace: &std::path::Path,
+) -> Result<Option<super::session_policy::SessionPolicy>, String> {
+    if task.graph_run_id.is_none() {
+        return Ok(None);
+    }
+    let policy = task
+        .policy
+        .as_ref()
+        .ok_or_else(|| format!("graph task '{}' is missing task policy", task.id))?;
+    let authority = policy
+        .get("authority")
+        .ok_or_else(|| format!("graph task '{}' policy is missing authority", task.id))?;
+
+    let string_array = |key: &str| -> Result<Vec<String>, String> {
+        authority
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("graph task '{}' authority.{key} is missing", task.id))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        format!("graph task '{}' authority.{key} contains a non-string", task.id)
+                    })
+            })
+            .collect()
+    };
+
+    let graph = super::session_policy::GraphSessionPolicy {
+        workspace_root: workspace.to_string_lossy().to_string(),
+        filesystem_read: string_array("filesystem_read")?,
+        filesystem_write: string_array("filesystem_write")?,
+        network: authority
+            .get("network")
+            .and_then(serde_json::Value::as_str)
+            == Some("allowed"),
+        git_commit: authority
+            .get("git_commit")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        git_push: authority
+            .get("git_push")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    };
+
+    Ok(Some(super::session_policy::SessionPolicy {
+        task_id: task.id.clone(),
+        approve_mode: super::session_policy::ApproveMode::Inherit,
+        written_at: crate::logger::timestamp_now(),
+        graph: Some(graph),
+    }))
+}
+
+fn clear_graph_authority(conn: &Connection, task: &TaskRow, clear_workspace: bool) {
+    if task.graph_run_id.is_none() {
+        return;
+    }
+    if let Ok(Some(session_id)) = super::tasks::latest_session_id(conn, &task.id) {
+        let _ = super::session_policy::delete(&session_id);
+    }
+    if clear_workspace {
+        if let Some(workspace) = task.workspace_path.as_deref() {
+            let _ = super::session_policy::delete_workspace(std::path::Path::new(workspace));
+        }
     }
 }
 
