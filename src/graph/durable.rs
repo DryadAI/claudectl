@@ -304,6 +304,26 @@ fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
                 provider.as_deref().unwrap_or_default()
             ));
         }
+        let request = agent_request(node)?;
+        if request.role.is_some() {
+            return Err(format!(
+                "durable supervisor V1 requires direct-spawn agents; node '{}' sets a role/mailbox route that can bypass workspace isolation",
+                node.id
+            ));
+        }
+        if request.model.is_some() {
+            return Err(format!(
+                "durable supervisor V1 does not yet enforce per-node model selection; remove request.model from node '{}'",
+                node.id
+            ));
+        }
+        if request.budget_usd.is_some() {
+            return Err(format!(
+                "durable supervisor V1 does not yet enforce per-node agent budgets; remove request.budget_usd from node '{}'",
+                node.id
+            ));
+        }
+
         if !node.authority.filesystem_write.is_empty() {
             if node.workspace.mode != WorkspaceMode::Worktree {
                 return Err(format!(
@@ -320,7 +340,6 @@ fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
                 }
             }
         }
-        agent_request(node)?;
     }
     Ok(())
 }
@@ -474,6 +493,53 @@ mod tests {
             task_outcome(tasks::TaskState::Cancelled, None),
             Outcome::Error
         );
+    }
+
+    #[test]
+    fn durable_v1_rejects_mailbox_model_and_budget_options() {
+        let mut node = agent("direct");
+        if let Some(ExecutorSpec::Provider { request, .. }) = node.executor.as_mut() {
+            *request = serde_json::json!({
+                "cwd": "/work/project",
+                "prompt": "inspect",
+                "role": "backend"
+            });
+        }
+        let compiled = compiler::compile(GraphSpec {
+            version: 1,
+            id: "role-rejected".into(),
+            goal: None,
+            policy: GraphPolicy::default(),
+            nodes: vec![node],
+            edges: vec![],
+        })
+        .unwrap();
+        let mut conn = store::open_memory();
+        assert!(submit_with_connection(&mut conn, &compiled)
+            .unwrap_err()
+            .contains("direct-spawn"));
+
+        let mut node = agent("model");
+        if let Some(ExecutorSpec::Provider { request, .. }) = node.executor.as_mut() {
+            *request = serde_json::json!({
+                "cwd": "/work/project",
+                "prompt": "inspect",
+                "model": "sonnet"
+            });
+        }
+        let compiled = compiler::compile(GraphSpec {
+            version: 1,
+            id: "model-rejected".into(),
+            goal: None,
+            policy: GraphPolicy::default(),
+            nodes: vec![node],
+            edges: vec![],
+        })
+        .unwrap();
+        let mut conn = store::open_memory();
+        assert!(submit_with_connection(&mut conn, &compiled)
+            .unwrap_err()
+            .contains("model selection"));
     }
 
     #[test]
