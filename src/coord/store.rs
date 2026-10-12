@@ -366,7 +366,7 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             id           TEXT PRIMARY KEY,
             graph_id     TEXT NOT NULL,
             fingerprint  TEXT NOT NULL,
-            state        TEXT NOT NULL DEFAULT 'SUBMITTED',
+            state        TEXT NOT NULL DEFAULT 'PENDING',
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
         );
