@@ -1515,6 +1515,28 @@ mod tests {
     }
 
     #[test]
+    fn v4_graph_identity_schema_exists_after_migrate() {
+        let conn = open_memory();
+        let graph_runs_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='graph_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(graph_runs_exists);
+
+        let mut stmt = conn.prepare("PRAGMA table_info(tasks)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(columns.contains(&"graph_run_id".to_string()));
+        assert!(columns.contains(&"graph_node_id".to_string()));
+    }
+
+    #[test]
     fn append_and_query_events() {
         let conn = open_memory();
 
