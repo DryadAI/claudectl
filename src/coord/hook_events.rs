@@ -75,6 +75,22 @@ pub fn since(conn: &Connection, since_id: i64, limit: usize) -> Result<Vec<HookE
     Ok(out)
 }
 
+pub fn has_hook_for_session_since(
+    conn: &Connection,
+    hook: &str,
+    session_id: &str,
+    since: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT COUNT(*) > 0
+         FROM hook_events
+         WHERE hook = ?1 AND session_id = ?2 AND ingested_at >= ?3",
+        params![hook, session_id, since],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("query hook completion: {e}"))
+}
+
 pub fn count(conn: &Connection) -> Result<u64, String> {
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM hook_events", [], |row| row.get(0))
@@ -115,6 +131,38 @@ mod tests {
         let after = since(&conn, id2, 10).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].hook, "Stop");
+    }
+
+    #[test]
+    fn finds_stop_for_session_since_timestamp() {
+        let conn = store::open_memory();
+        let event = HookEvent {
+            id: None,
+            hook: "Stop".into(),
+            session_id: Some("sess_x".into()),
+            tool: None,
+            payload: "{}".into(),
+            ingested_at: "2026-10-12T03:00:00Z".into(),
+        };
+        append(&conn, &event).unwrap();
+        assert!(
+            has_hook_for_session_since(
+                &conn,
+                "Stop",
+                "sess_x",
+                "2026-10-12T02:59:59Z"
+            )
+            .unwrap()
+        );
+        assert!(
+            !has_hook_for_session_since(
+                &conn,
+                "Stop",
+                "sess_x",
+                "2026-10-12T03:00:01Z"
+            )
+            .unwrap()
+        );
     }
 
     #[test]
