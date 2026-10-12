@@ -1184,9 +1184,6 @@ fn emit_headless_event(event: &str, data: serde_json::Value, json_mode: bool) {
     }
 }
 
-/// Check for context rot and raise typed interrupts for decaying sessions.
-/// Sensor stub for headless mode while the live JSONL/`ps`/hook-event
-/// reader lands in PR4 (#346). Reports zero events seen and no sessions,
 /// Live supervisor sensors derived from the same session snapshot the
 /// headless dashboard already refreshes. Hook completion is queried directly
 /// from coord.db by the reconciler; this surface is for process/session state.
@@ -1238,13 +1235,9 @@ impl crate::coord::supervisor::Sensors for LiveSensors {
     }
 }
 
-/// Real side effects for the supervisor's actuator (#345). Routes
-/// `AssignViaMailbox` through the bus's publish path (sanitized body,
-/// hop guard from PR2). `spawn_session` is stubbed for this PR — the
-/// `launch::launch` path requires an attached terminal and is wired in
-/// PR5 alongside the verifier runner. Until then, the spawn fallback
-/// path returns a synthetic error and the reconciler will retry on
-/// the next tick.
+/// Real side effects for the supervisor actuator. Mailbox assignments use
+/// the bus; direct graph tasks launch through claudectl-core's terminal
+/// launcher and are correlated back to a real Claude session id by exact cwd.
 #[cfg(all(feature = "coord", feature = "bus"))]
 struct LiveSideEffects;
 #[cfg(all(feature = "coord", feature = "bus"))]
@@ -1387,12 +1380,23 @@ impl crate::coord::actuator::SideEffects for NoopSideEffects {
 
 #[cfg(feature = "coord")]
 fn launch_supervised_session(cwd: &std::path::Path, prompt: &str) -> Result<String, String> {
-    let before: std::collections::HashSet<String> = discovery::scan_sessions()
+    let request = launch::prepare(cwd.to_string_lossy().as_ref(), Some(prompt), None)?;
+
+    let mut existing = discovery::scan_sessions();
+    discovery::resolve_jsonl_paths(&mut existing);
+    if let Some(session) = existing.iter().find(|session| {
+        std::path::Path::new(&session.cwd)
+            .canonicalize()
+            .is_ok_and(|session_cwd| session_cwd == request.cwd_path)
+            && !matches!(session.status, session::SessionStatus::Finished)
+    }) {
+        return Ok(session.session_id.clone());
+    }
+    let before: std::collections::HashSet<String> = existing
         .into_iter()
         .map(|session| session.session_id)
         .collect();
 
-    let request = launch::prepare(cwd.to_string_lossy().as_ref(), Some(prompt), None)?;
     let _target = launch::launch(&request)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
