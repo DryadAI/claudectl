@@ -109,8 +109,19 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 cwd.clone()
             };
             let session_id = fx.spawn_session(&launch_cwd, &task.prompt)?;
-            let _attempt_id =
-                insert_attempt(conn, task_id, next_num, Some(&session_id), None, None)?;
+            let cwd_hash = if task.graph_run_id.is_some() {
+                Some(super::workspace::workspace_revision(&launch_cwd)?)
+            } else {
+                None
+            };
+            let _attempt_id = insert_attempt(
+                conn,
+                task_id,
+                next_num,
+                Some(&session_id),
+                None,
+                cwd_hash.as_deref(),
+            )?;
             transition(
                 conn,
                 task_id,
@@ -243,8 +254,15 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             let launch_cwd = task_launch_cwd(conn, &task)?;
             let next_num = attempt_count(conn, task_id)? + 1;
             let session_id = fx.spawn_session(&launch_cwd, &retry_prompt)?;
-            let _attempt_id =
-                insert_attempt(conn, task_id, next_num, Some(&session_id), None, None)?;
+            let cwd_hash = Some(super::workspace::workspace_revision(&launch_cwd)?);
+            let _attempt_id = insert_attempt(
+                conn,
+                task_id,
+                next_num,
+                Some(&session_id),
+                None,
+                cwd_hash.as_deref(),
+            )?;
             transition(
                 conn,
                 task_id,
