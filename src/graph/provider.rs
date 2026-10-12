@@ -158,6 +158,7 @@ mod tests {
             description: None,
             requires: vec!["example.inspect".into()],
             authority: Authority::default(),
+            workspace: Default::default(),
             risk: RiskLevel::Low,
             retry: RetryPolicy::default(),
             inputs: vec![],
