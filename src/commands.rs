@@ -1333,6 +1333,10 @@ impl crate::coord::actuator::SideEffects for LiveSideEffects {
     fn spawn_session(&self, cwd: &std::path::Path, prompt: &str) -> Result<String, String> {
         launch_supervised_session(cwd, prompt)
     }
+
+    fn send_input(&self, session_id: &str, text: &str) -> Result<(), String> {
+        send_supervised_input(session_id, text)
+    }
 }
 
 /// Bus-less fallback so the supervisor can run in a `--no-default-
@@ -1376,6 +1380,20 @@ impl crate::coord::actuator::SideEffects for NoopSideEffects {
     fn spawn_session(&self, cwd: &std::path::Path, prompt: &str) -> Result<String, String> {
         launch_supervised_session(cwd, prompt)
     }
+
+    fn send_input(&self, session_id: &str, text: &str) -> Result<(), String> {
+        send_supervised_input(session_id, text)
+    }
+}
+
+#[cfg(feature = "coord")]
+fn send_supervised_input(session_id: &str, text: &str) -> Result<(), String> {
+    let sessions = discovery::scan_sessions();
+    let session = sessions
+        .iter()
+        .find(|session| session.session_id == session_id)
+        .ok_or_else(|| format!("Claude session not found: {session_id}"))?;
+    crate::terminals::send_input(session, text)
 }
 
 #[cfg(feature = "coord")]
