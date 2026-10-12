@@ -1521,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_graph_identity_schema_exists_after_migrate() {
+    fn v5_graph_identity_and_workspace_schema_exist_after_migrate() {
         let conn = open_memory();
         let graph_runs_exists: bool = conn
             .query_row(
@@ -1540,6 +1540,7 @@ mod tests {
             .collect();
         assert!(columns.contains(&"graph_run_id".to_string()));
         assert!(columns.contains(&"graph_node_id".to_string()));
+        assert!(columns.contains(&"workspace_path".to_string()));
     }
 
     #[test]
