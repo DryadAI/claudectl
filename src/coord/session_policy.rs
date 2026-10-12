@@ -41,6 +41,23 @@ pub struct SessionPolicy {
     pub task_id: String,
     pub approve_mode: ApproveMode,
     pub written_at: String,
+    #[serde(default)]
+    pub graph: Option<GraphSessionPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphSessionPolicy {
+    pub workspace_root: String,
+    #[serde(default)]
+    pub filesystem_read: Vec<String>,
+    #[serde(default)]
+    pub filesystem_write: Vec<String>,
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub git_commit: bool,
+    #[serde(default)]
+    pub git_push: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,6 +110,18 @@ pub fn read(session_id: &str) -> Option<SessionPolicy> {
     read_at(&dir(), session_id)
 }
 
+pub fn read_strict(session_id: &str) -> Result<Option<SessionPolicy>, String> {
+    let path = file_path(&dir(), session_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(&path)
+        .map_err(|e| format!("read session policy '{}': {e}", path.display()))?;
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|e| format!("parse session policy '{}': {e}", path.display()))
+}
+
 pub fn read_at(target_dir: &Path, session_id: &str) -> Option<SessionPolicy> {
     let path = file_path(target_dir, session_id);
     let body = fs::read_to_string(path).ok()?;
@@ -123,6 +152,7 @@ mod tests {
             task_id: task_id.into(),
             approve_mode: ApproveMode::ForceManual,
             written_at: "2026-06-09T12:00:00Z".into(),
+            graph: None,
         }
     }
 
