@@ -95,6 +95,7 @@ pub struct TaskRow {
     pub verifiers: Vec<super::verify::Verifier>,
     pub graph_run_id: Option<String>,
     pub graph_node_id: Option<String>,
+    pub workspace_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -147,7 +148,7 @@ pub fn insert_task_with_identity(
     conn.execute(
         "INSERT INTO tasks (id, name, state, role, cwd, prompt, model, budget_usd,
                             max_retries, timeout_min, depends_on, policy, verifiers,
-                            graph_run_id, graph_node_id, created_at, updated_at)
+                            graph_run_id, graph_node_id, workspace_path, created_at, updated_at)
          VALUES (?1, ?2, 'PENDING', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                  ?13, ?14, ?15, ?15)",
         params![
@@ -183,7 +184,7 @@ pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, String> 
     conn.query_row(
         "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                 max_retries, timeout_min, depends_on, policy, verifiers,
-                graph_run_id, graph_node_id, created_at, updated_at
+                graph_run_id, graph_node_id, workspace_path, created_at, updated_at
          FROM tasks WHERE id = ?1",
         params![id],
         row_to_task,
@@ -200,7 +201,7 @@ pub fn list_tasks_for_graph_run(
         .prepare(
             "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                     max_retries, timeout_min, depends_on, policy, verifiers,
-                    graph_run_id, graph_node_id, created_at, updated_at
+                    graph_run_id, graph_node_id, workspace_path, created_at, updated_at
              FROM tasks
              WHERE graph_run_id = ?1
              ORDER BY graph_node_id, created_at",
@@ -216,10 +217,23 @@ pub fn list_tasks_for_graph_run(
     Ok(out)
 }
 
+pub fn set_workspace_path(
+    conn: &Connection,
+    task_id: &str,
+    workspace_path: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE tasks SET workspace_path = ?1, updated_at = ?2 WHERE id = ?3",
+        params![workspace_path, now(), task_id],
+    )
+    .map_err(|e| format!("set workspace path: {e}"))?;
+    Ok(())
+}
+
 pub fn list_tasks(conn: &Connection, state: Option<TaskState>) -> Result<Vec<TaskRow>, String> {
     let sql = "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                       max_retries, timeout_min, depends_on, policy, verifiers,
-                      graph_run_id, graph_node_id, created_at, updated_at
+                      graph_run_id, graph_node_id, workspace_path, created_at, updated_at
                FROM tasks
                WHERE (?1 IS NULL OR state = ?1)
                ORDER BY created_at";
@@ -583,8 +597,9 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
             .unwrap_or_default(),
         graph_run_id: row.get(13)?,
         graph_node_id: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        workspace_path: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
@@ -652,6 +667,10 @@ mod tests {
         let got = get_task(&conn, "task_graph_1").unwrap().unwrap();
         assert_eq!(got.graph_run_id.as_deref(), Some("graph_run_1"));
         assert_eq!(got.graph_node_id.as_deref(), Some("node_a"));
+        assert_eq!(got.workspace_path, None);
+        set_workspace_path(&conn, "task_graph_1", "/tmp/worktree").unwrap();
+        let got = get_task(&conn, "task_graph_1").unwrap().unwrap();
+        assert_eq!(got.workspace_path.as_deref(), Some("/tmp/worktree"));
     }
 
     #[test]
