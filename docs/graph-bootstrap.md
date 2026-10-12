@@ -72,3 +72,16 @@ Submission is atomic:
 6. Every task transition refreshes the parent graph-run state transactionally.
 
 Human-authored supervisor TOML keeps using dependency names for ergonomics, but the CLI resolves those names to preallocated task ids before insertion. The ledger never relies on global task-name matching.
+
+
+## Durable outcome mapping
+
+`graph status` maps supervisor state back into the same graph outcome vocabulary used by the seed runner:
+
+- supervisor `DONE` → graph `PASS`
+- `NEEDS_HUMAN` with a latest verifier verdict of `FAIL` → graph `FAIL`
+- `NEEDS_HUMAN` for other causes → graph `UNKNOWN`
+- `CANCELLED` → graph `ERROR`
+- pending, assigned, running, verifying, retrying, or resuming work → graph `UNKNOWN`
+
+A durable graph run is `PASS` only when every node is `PASS`. `ERROR` takes precedence over `FAIL`, and any unresolved node keeps the run `UNKNOWN`.
