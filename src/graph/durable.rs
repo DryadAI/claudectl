@@ -349,6 +349,7 @@ mod tests {
             description: None,
             requires: vec![AGENT_EXECUTE_CAPABILITY.into()],
             authority: Authority::default(),
+            workspace: Default::default(),
             risk: RiskLevel::Reversible,
             retry: RetryPolicy { max_attempts: 2 },
             inputs: vec![],
