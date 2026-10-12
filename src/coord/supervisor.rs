@@ -332,8 +332,16 @@ impl Supervisor {
                 continue;
             };
 
-            if let Some(attempt_id) = super::tasks::latest_attempt_id(conn, &task.id)? {
-                if super::hook_events::has_hook_for_session(conn, "Stop", &session_id)? {
+            if let (Some(attempt_id), Some(hook_cursor)) = (
+                super::tasks::latest_attempt_id(conn, &task.id)?,
+                super::tasks::latest_attempt_hook_cursor(conn, &task.id)?,
+            ) {
+                if super::hook_events::has_hook_for_session_after(
+                    conn,
+                    "Stop",
+                    &session_id,
+                    hook_cursor,
+                )? {
                     out.push(Action::RunVerifier {
                         task_id: task.id.clone(),
                         attempt_id,
@@ -690,12 +698,6 @@ mod tests {
             "test-running",
         )
         .unwrap();
-        let attempt_id =
-            insert_attempt(&conn, &task_id, 1, Some("sess-stop"), None, None).unwrap();
-
-        let started_at = crate::coord::tasks::latest_attempt_started_at(&conn, &task_id)
-            .unwrap()
-            .unwrap();
         crate::coord::hook_events::append(
             &conn,
             &crate::coord::hook_events::HookEvent {
@@ -704,7 +706,46 @@ mod tests {
                 session_id: Some("sess-stop".into()),
                 tool: None,
                 payload: "{}".into(),
-                ingested_at: started_at,
+                ingested_at: crate::logger::timestamp_now(),
+            },
+        )
+        .unwrap();
+        let cursor = crate::coord::hook_events::latest_id(&conn).unwrap();
+        let attempt_id = crate::coord::tasks::insert_attempt_with_hook_cursor(
+            &conn,
+            &task_id,
+            1,
+            Some("sess-stop"),
+            None,
+            None,
+            cursor,
+        )
+        .unwrap();
+
+        // A Stop that predates the attempt cursor must not complete it.
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            Action::RunVerifier { task_id: id, .. } if id == &task_id
+        )));
+
+        crate::coord::hook_events::append(
+            &conn,
+            &crate::coord::hook_events::HookEvent {
+                id: None,
+                hook: "Stop".into(),
+                session_id: Some("sess-stop".into()),
+                tool: None,
+                payload: "{}".into(),
+                ingested_at: crate::logger::timestamp_now(),
             },
         )
         .unwrap();
