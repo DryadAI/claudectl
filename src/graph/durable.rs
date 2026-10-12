@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::compiler::CompiledGraph;
@@ -36,9 +36,106 @@ pub struct DurableSubmission {
     pub task_ids: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DurableNodeStatus {
+    pub node_id: String,
+    pub task_id: String,
+    pub state: String,
+    pub latest_verification: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DurableRunStatus {
+    pub graph_run_id: String,
+    pub graph_id: String,
+    pub fingerprint: String,
+    pub stored_state: String,
+    pub effective_state: String,
+    pub nodes: Vec<DurableNodeStatus>,
+}
+
 pub fn submit(compiled: &CompiledGraph) -> Result<DurableSubmission, String> {
     let mut conn = store::open()?;
     submit_with_connection(&mut conn, compiled)
+}
+
+pub fn status(graph_run_id: &str) -> Result<DurableRunStatus, String> {
+    let conn = store::open()?;
+    status_with_connection(&conn, graph_run_id)
+}
+
+fn status_with_connection(
+    conn: &Connection,
+    graph_run_id: &str,
+) -> Result<DurableRunStatus, String> {
+    let run = conn
+        .query_row(
+            "SELECT graph_id, fingerprint, state FROM graph_runs WHERE id = ?1",
+            params![graph_run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("query graph run: {e}"))?
+        .ok_or_else(|| format!("graph run '{graph_run_id}' not found"))?;
+
+    let tasks = tasks::list_tasks_for_graph_run(conn, graph_run_id)?;
+    let mut nodes = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        nodes.push(DurableNodeStatus {
+            node_id: task
+                .graph_node_id
+                .clone()
+                .unwrap_or_else(|| task.name.clone()),
+            task_id: task.id.clone(),
+            state: task.state.as_str().to_string(),
+            latest_verification: tasks::latest_verification(conn, &task.id)?,
+        });
+    }
+
+    let effective_state = if tasks.is_empty() {
+        "EMPTY"
+    } else if tasks.iter().all(|task| task.state == tasks::TaskState::Done) {
+        "DONE"
+    } else if tasks
+        .iter()
+        .any(|task| task.state == tasks::TaskState::NeedsHuman)
+    {
+        "NEEDS_HUMAN"
+    } else if tasks
+        .iter()
+        .any(|task| task.state == tasks::TaskState::Cancelled)
+    {
+        "CANCELLED"
+    } else if tasks.iter().any(|task| {
+        matches!(
+            task.state,
+            tasks::TaskState::Assigned
+                | tasks::TaskState::Running
+                | tasks::TaskState::Verifying
+                | tasks::TaskState::Retrying
+                | tasks::TaskState::Resuming
+        )
+    }) {
+        "RUNNING"
+    } else {
+        "PENDING"
+    }
+    .to_string();
+
+    Ok(DurableRunStatus {
+        graph_run_id: graph_run_id.to_string(),
+        graph_id: run.0,
+        fingerprint: run.1,
+        stored_state: run.2,
+        effective_state,
+        nodes,
+    })
 }
 
 fn submit_with_connection(
@@ -279,6 +376,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(run_count, 1);
+
+        let status = status_with_connection(&conn, &submission.graph_run_id).unwrap();
+        assert_eq!(status.effective_state, "PENDING");
+        assert_eq!(status.nodes.len(), 2);
     }
 
     #[test]
