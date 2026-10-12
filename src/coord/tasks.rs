@@ -150,7 +150,7 @@ pub fn insert_task_with_identity(
                             max_retries, timeout_min, depends_on, policy, verifiers,
                             graph_run_id, graph_node_id, workspace_path, created_at, updated_at)
          VALUES (?1, ?2, 'PENDING', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                 ?13, ?14, ?15, ?15)",
+                 ?13, ?14, NULL, ?15, ?15)",
         params![
             id,
             t.name,
