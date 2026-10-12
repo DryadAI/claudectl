@@ -184,7 +184,6 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                     TaskState::Done,
                     "no-verifiers",
                 )?;
-                clear_graph_authority(conn, &task, true);
                 maybe_auto_post_pr(task_id);
                 return Ok(());
             }
@@ -236,11 +235,6 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                             _ => "verify-fail",
                         },
                     )?;
-                    clear_graph_authority(
-                        conn,
-                        &task,
-                        next_state == TaskState::NeedsHuman,
-                    );
                     return Ok(());
                 }
                 // PASS path: fall through to the next verifier.
@@ -254,7 +248,6 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 TaskState::Done,
                 "verify-pass",
             )?;
-            clear_graph_authority(conn, &task, true);
             maybe_auto_post_pr(task_id);
             Ok(())
         }
@@ -339,7 +332,6 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 TaskState::Pending,
                 "resume-ready",
             )?;
-            clear_graph_authority(conn, &task, false);
             Ok(())
         }
         Action::EscalateHuman { task_id, cause } => {
@@ -416,20 +408,6 @@ fn graph_session_policy(
         written_at: crate::logger::timestamp_now(),
         graph: Some(graph),
     }))
-}
-
-fn clear_graph_authority(conn: &Connection, task: &TaskRow, clear_workspace: bool) {
-    if task.graph_run_id.is_none() {
-        return;
-    }
-    if let Ok(Some(session_id)) = super::tasks::latest_session_id(conn, &task.id) {
-        let _ = super::session_policy::delete(&session_id);
-    }
-    if clear_workspace {
-        if let Some(workspace) = task.workspace_path.as_deref() {
-            let _ = super::session_policy::delete_workspace(std::path::Path::new(workspace));
-        }
-    }
 }
 
 fn task_launch_cwd(
