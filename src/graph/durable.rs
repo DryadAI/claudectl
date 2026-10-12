@@ -323,6 +323,12 @@ fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
                 node.id
             ));
         }
+        if request.timeout_min.is_some() {
+            return Err(format!(
+                "durable supervisor V1 does not yet enforce per-node wall-clock timeouts; remove request.timeout_min from node '{}'",
+                node.id
+            ));
+        }
 
         if !node.authority.filesystem_write.is_empty() {
             if node.workspace.mode != WorkspaceMode::Worktree {
