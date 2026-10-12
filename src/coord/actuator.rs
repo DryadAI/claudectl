@@ -22,7 +22,8 @@ use rusqlite::Connection;
 
 use super::supervisor::Action;
 use super::tasks::{
-    TaskRow, TaskState, attempt_count, get_task, insert_attempt, latest_failed_verification,
+    TaskRow, TaskState, attempt_count, get_task, insert_attempt,
+    insert_attempt_with_hook_cursor, latest_failed_verification, latest_session_id,
     record_verification, set_workspace_path, transition,
 };
 use super::verify::{VerdictKind, VerifierBackend, run_verifier};
@@ -49,6 +50,9 @@ pub trait SideEffects: VerifierBackend {
     /// returned session_id as durable — restarting the daemon shouldn't
     /// re-spawn the same task.
     fn spawn_session(&self, cwd: &std::path::Path, prompt: &str) -> Result<String, String>;
+
+    /// Continue an existing Claude Code session with a new prompt.
+    fn send_input(&self, session_id: &str, text: &str) -> Result<(), String>;
 }
 
 /// Carry out one action against the SQL store and the side-effect
@@ -113,6 +117,7 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 super::session_policy::write_workspace(&launch_cwd, policy)
                     .map_err(|e| format!("write graph workspace policy: {e}"))?;
             }
+            let hook_cursor = super::hook_events::latest_id(conn)?;
             let session_id = fx.spawn_session(&launch_cwd, &task.prompt)?;
             if let Some(policy) = graph_policy.as_ref() {
                 let _ = super::session_policy::write(&session_id, policy);
@@ -122,13 +127,14 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             } else {
                 None
             };
-            let _attempt_id = insert_attempt(
+            let _attempt_id = insert_attempt_with_hook_cursor(
                 conn,
                 task_id,
                 next_num,
                 Some(&session_id),
                 None,
                 cwd_hash.as_deref(),
+                hook_cursor,
             )?;
             transition(
                 conn,
@@ -273,18 +279,23 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                     .map_err(|e| format!("write graph workspace policy: {e}"))?;
             }
             let next_num = attempt_count(conn, task_id)? + 1;
-            let session_id = fx.spawn_session(&launch_cwd, &retry_prompt)?;
+            let hook_cursor = super::hook_events::latest_id(conn)?;
+            let session_id = match latest_session_id(conn, task_id)? {
+                Some(existing) if fx.send_input(&existing, &retry_prompt).is_ok() => existing,
+                _ => fx.spawn_session(&launch_cwd, &retry_prompt)?,
+            };
             if let Some(policy) = graph_policy.as_ref() {
                 let _ = super::session_policy::write(&session_id, policy);
             }
             let cwd_hash = Some(super::workspace::workspace_revision(&launch_cwd)?);
-            let _attempt_id = insert_attempt(
+            let _attempt_id = insert_attempt_with_hook_cursor(
                 conn,
                 task_id,
                 next_num,
                 Some(&session_id),
                 None,
                 cwd_hash.as_deref(),
+                hook_cursor,
             )?;
             transition(
                 conn,
@@ -515,6 +526,7 @@ mod tests {
     struct RecordingFx {
         published: std::cell::RefCell<Vec<(String, String, u32)>>,
         spawned: std::cell::RefCell<Vec<(std::path::PathBuf, String)>>,
+        sent: std::cell::RefCell<Vec<(String, String)>>,
         next_message_id: std::cell::RefCell<u64>,
         next_session_id: std::cell::RefCell<u64>,
         shell_results:
@@ -529,6 +541,7 @@ mod tests {
             Self {
                 published: Default::default(),
                 spawned: Default::default(),
+                sent: Default::default(),
                 next_message_id: std::cell::RefCell::new(1),
                 next_session_id: std::cell::RefCell::new(1),
                 shell_results: Default::default(),
@@ -603,6 +616,13 @@ mod tests {
                 .borrow_mut()
                 .push((cwd.to_path_buf(), prompt.to_string()));
             Ok(out)
+        }
+
+        fn send_input(&self, session_id: &str, text: &str) -> Result<(), String> {
+            self.sent
+                .borrow_mut()
+                .push((session_id.to_string(), text.to_string()));
+            Ok(())
         }
     }
 
@@ -846,10 +866,12 @@ mod tests {
         let task = get_task(&conn, &id).unwrap().unwrap();
         assert_eq!(task.state, TaskState::Running);
         assert_eq!(crate::coord::tasks::attempt_count(&conn, &id).unwrap(), 2);
-        let spawned = fx.spawned.borrow();
-        assert_eq!(spawned.len(), 1);
-        assert!(spawned[0].1.contains("assertion failed"));
-        assert!(spawned[0].1.contains("Previous attempt failed verification"));
+        let sent = fx.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "sess-old");
+        assert!(sent[0].1.contains("assertion failed"));
+        assert!(sent[0].1.contains("Previous attempt failed verification"));
+        assert!(fx.spawned.borrow().is_empty());
     }
 
     #[test]
