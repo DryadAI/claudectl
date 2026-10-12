@@ -364,6 +364,24 @@ pub fn record_verification(
 /// Most recent verifier `(kind, verdict)` for a task, across all its attempts
 /// (#368/#369). Joins `task_verifications` → `task_attempts` on `attempt_id`
 /// and takes the newest by `ran_at`. `None` when no verifier has run yet.
+pub fn latest_failed_verification(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    conn.query_row(
+        "SELECT v.kind, COALESCE(v.output, '')
+         FROM task_verifications v
+         JOIN task_attempts a ON a.id = v.attempt_id
+         WHERE a.task_id = ?1 AND v.verdict = 'FAIL'
+         ORDER BY v.ran_at DESC, v.id DESC
+         LIMIT 1",
+        params![task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| format!("latest failed verification: {e}"))
+}
+
 pub fn latest_verification(
     conn: &Connection,
     task_id: &str,
