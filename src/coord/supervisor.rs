@@ -430,6 +430,173 @@ mod tests {
     }
 
     #[test]
+    fn pending_task_waits_for_dependency_then_runs_after_done() {
+        let mut conn = store::open_memory();
+        let upstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "upstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do upstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+        let downstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "downstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do downstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![upstream.clone()],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+
+        let sup = Supervisor::with_defaults();
+        let sensors = StubSensors {
+            last_id: 0,
+            sessions: vec![],
+        };
+        let actions = sup.tick(&conn, &sensors).unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Spawn { task_id, .. } if task_id == &upstream
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            Action::Spawn { task_id, .. } if task_id == &downstream
+        )));
+
+        transition(
+            &mut conn,
+            &upstream,
+            TaskState::Pending,
+            TaskState::Done,
+            "test-complete",
+        )
+        .unwrap();
+        let actions = sup.tick(&conn, &sensors).unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Spawn { task_id, .. } if task_id == &downstream
+        )));
+    }
+
+    #[test]
+    fn pending_task_escalates_on_missing_dependency() {
+        let conn = store::open_memory();
+        let task_id = insert_task(
+            &conn,
+            &NewTask {
+                name: "blocked".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do blocked".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec!["task_does_not_exist".into()],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::EscalateHuman { task_id: id, cause }
+                if id == &task_id && cause.contains("dependency-missing")
+        )));
+    }
+
+    #[test]
+    fn pending_task_escalates_when_dependency_needs_human() {
+        let mut conn = store::open_memory();
+        let upstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "upstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do upstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            &upstream,
+            TaskState::Pending,
+            TaskState::NeedsHuman,
+            "test-blocked",
+        )
+        .unwrap();
+        let downstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "downstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do downstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![upstream],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::EscalateHuman { task_id, cause }
+                if task_id == &downstream && cause.contains("dependency-terminal")
+        )));
+    }
+
+    #[test]
     fn tick_emits_assign_for_pending_with_role() {
         let conn = store::open_memory();
         let id = insert_task(
