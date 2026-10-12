@@ -1,4 +1,6 @@
 pub mod compiler;
+#[cfg(feature = "coord")]
+pub mod durable;
 pub mod provider;
 pub mod rea;
 pub mod runner;
@@ -28,6 +30,18 @@ pub enum GraphCommand {
     Run {
         /// Path to a graph JSON file.
         path: String,
+    },
+    #[cfg(feature = "coord")]
+    /// Submit an agent-only graph to the durable supervisor ledger.
+    Submit {
+        /// Path to a graph JSON file.
+        path: String,
+    },
+    #[cfg(feature = "coord")]
+    /// Show durable supervisor state for one graph run.
+    Status {
+        /// Durable graph run id returned by `graph submit`.
+        graph_run_id: String,
     },
 }
 
@@ -108,6 +122,55 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
                     "graph stopped with FAIL, UNKNOWN, or ERROR outcome",
                 ))
             }
+        }
+        #[cfg(feature = "coord")]
+        GraphCommand::Submit { path } => {
+            let compiled = load_and_compile(path)?;
+            let submission = durable::submit(&compiled).map_err(io::Error::other)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&submission)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                );
+            } else {
+                println!("Submitted durable graph run: {}", submission.graph_run_id);
+                println!("Graph: {}", submission.graph_id);
+                println!("Fingerprint: {}", submission.fingerprint);
+                for (node_id, task_id) in &submission.task_ids {
+                    println!("  {node_id} -> {task_id}");
+                }
+            }
+            Ok(())
+        }
+        #[cfg(feature = "coord")]
+        GraphCommand::Status { graph_run_id } => {
+            let status = durable::status(graph_run_id).map_err(io::Error::other)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&status)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                );
+            } else {
+                println!(
+                    "Graph run {}: {} ({})",
+                    status.graph_run_id, status.effective_state, status.graph_id
+                );
+                println!("Fingerprint: {}", status.fingerprint);
+                for node in &status.nodes {
+                    let verification = node
+                        .latest_verification
+                        .as_ref()
+                        .map(|(kind, verdict)| format!(" verify={kind}:{verdict}"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {:<14} {} -> {}{}",
+                        node.state, node.node_id, node.task_id, verification
+                    );
+                }
+            }
+            Ok(())
         }
     }
 }
