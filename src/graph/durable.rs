@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::compiler::CompiledGraph;
-use super::schema::{ExecutorSpec, NodeKind, NodeSpec, Outcome};
+use super::schema::{ExecutorSpec, NodeKind, NodeSpec, Outcome, WorkspaceMode};
 use crate::coord::store;
 use crate::coord::tasks::{self, NewTask};
 use crate::coord::verify::Verifier;
@@ -236,6 +236,7 @@ fn submit_with_connection(
                     "fingerprint": compiled.fingerprint.as_str(),
                 },
                 "authority": &node.authority,
+                "workspace": &node.workspace,
                 "risk": node.risk,
                 "requires": &node.requires,
             })),
@@ -302,6 +303,22 @@ fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
                 node.id,
                 provider.as_deref().unwrap_or_default()
             ));
+        }
+        if !node.authority.filesystem_write.is_empty() {
+            if node.workspace.mode != WorkspaceMode::Worktree {
+                return Err(format!(
+                    "durable writable agent node '{}' must use workspace.mode='worktree'",
+                    node.id
+                ));
+            }
+            for path in &node.authority.filesystem_write {
+                if std::path::Path::new(path).is_absolute() {
+                    return Err(format!(
+                        "durable writable agent node '{}' has absolute write authority '{}'; worktree write scopes must be relative",
+                        node.id, path
+                    ));
+                }
+            }
         }
         agent_request(node)?;
     }
@@ -457,6 +474,39 @@ mod tests {
             task_outcome(tasks::TaskState::Cancelled, None),
             Outcome::Error
         );
+    }
+
+    #[test]
+    fn durable_writable_agents_require_worktree_and_relative_scope() {
+        let mut node = agent("writer");
+        node.authority.filesystem_write = vec!["src/**".into()];
+        let compiled = compiler::compile(GraphSpec {
+            version: 1,
+            id: "writer".into(),
+            goal: None,
+            policy: GraphPolicy::default(),
+            nodes: vec![node.clone()],
+            edges: vec![],
+        })
+        .unwrap();
+        let mut conn = store::open_memory();
+        let err = submit_with_connection(&mut conn, &compiled).unwrap_err();
+        assert!(err.contains("workspace.mode='worktree'"));
+
+        node.workspace.mode = WorkspaceMode::Worktree;
+        node.authority.filesystem_write = vec!["/tmp/outside".into()];
+        let compiled = compiler::compile(GraphSpec {
+            version: 1,
+            id: "writer-absolute".into(),
+            goal: None,
+            policy: GraphPolicy::default(),
+            nodes: vec![node],
+            edges: vec![],
+        })
+        .unwrap();
+        let mut conn = store::open_memory();
+        let err = submit_with_connection(&mut conn, &compiled).unwrap_err();
+        assert!(err.contains("absolute write authority"));
     }
 
     #[test]
