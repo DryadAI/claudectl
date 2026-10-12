@@ -1,3 +1,5 @@
+#[cfg(feature = "coord")]
+pub mod authority;
 pub mod compiler;
 #[cfg(feature = "coord")]
 pub mod durable;
@@ -31,6 +33,9 @@ pub enum GraphCommand {
         /// Path to a graph JSON file.
         path: String,
     },
+    /// Internal Claude Code PreToolUse authority check. Normal sessions no-op.
+    #[command(hide = true)]
+    AuthorizeTool,
     #[cfg(feature = "coord")]
     /// Submit an agent-only graph to the durable supervisor ledger.
     Submit {
@@ -121,6 +126,16 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
                 Err(io::Error::other(
                     "graph stopped with FAIL, UNKNOWN, or ERROR outcome",
                 ))
+            }
+        }
+        GraphCommand::AuthorizeTool => {
+            #[cfg(feature = "coord")]
+            {
+                return authority::authorize_stdin();
+            }
+            #[cfg(not(feature = "coord"))]
+            {
+                Ok(())
             }
         }
         #[cfg(feature = "coord")]
