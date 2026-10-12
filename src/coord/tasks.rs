@@ -93,6 +93,8 @@ pub struct TaskRow {
     /// short-circuit on first FAIL. Empty list ⇒ the task graduates to
     /// DONE as soon as the session ends — gates are opt-in.
     pub verifiers: Vec<super::verify::Verifier>,
+    pub graph_run_id: Option<String>,
+    pub graph_node_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -116,6 +118,20 @@ pub struct NewTask {
 
 pub fn insert_task(conn: &Connection, t: &NewTask) -> Result<String, String> {
     let id = gen_id("task");
+    insert_task_with_identity(conn, &id, None, None, t)?;
+    Ok(id)
+}
+
+/// Insert a task with a caller-supplied durable id and optional graph identity.
+/// Graph submission preallocates every task id first so dependency edges can be
+/// stored as unambiguous task ids in one transaction.
+pub fn insert_task_with_identity(
+    conn: &Connection,
+    id: &str,
+    graph_run_id: Option<&str>,
+    graph_node_id: Option<&str>,
+    t: &NewTask,
+) -> Result<(), String> {
     let now = now();
     let depends_on = serde_json::to_string(&t.depends_on).map_err(|e| format!("json: {e}"))?;
     let policy = t
@@ -131,8 +147,9 @@ pub fn insert_task(conn: &Connection, t: &NewTask) -> Result<String, String> {
     conn.execute(
         "INSERT INTO tasks (id, name, state, role, cwd, prompt, model, budget_usd,
                             max_retries, timeout_min, depends_on, policy, verifiers,
-                            created_at, updated_at)
-         VALUES (?1, ?2, 'PENDING', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                            graph_run_id, graph_node_id, created_at, updated_at)
+         VALUES (?1, ?2, 'PENDING', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                 ?13, ?14, ?15, ?15)",
         params![
             id,
             t.name,
@@ -146,27 +163,27 @@ pub fn insert_task(conn: &Connection, t: &NewTask) -> Result<String, String> {
             depends_on,
             policy,
             verifiers,
+            graph_run_id,
+            graph_node_id,
             now,
         ],
     )
     .map_err(|e| format!("insert task: {e}"))?;
-    // Initial transition log entry — null `from_state` would break the NOT NULL
-    // constraint, so we write the synthetic 'CREATED' bookmark.
     log_transition(
         conn,
-        &id,
+        id,
         "CREATED",
         TaskState::Pending.as_str(),
         "submitted",
     )?;
-    Ok(id)
+    Ok(())
 }
 
 pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, String> {
     conn.query_row(
         "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                 max_retries, timeout_min, depends_on, policy, verifiers,
-                created_at, updated_at
+                graph_run_id, graph_node_id, created_at, updated_at
          FROM tasks WHERE id = ?1",
         params![id],
         row_to_task,
@@ -178,7 +195,7 @@ pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, String> 
 pub fn list_tasks(conn: &Connection, state: Option<TaskState>) -> Result<Vec<TaskRow>, String> {
     let sql = "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                       max_retries, timeout_min, depends_on, policy, verifiers,
-                      created_at, updated_at
+                      graph_run_id, graph_node_id, created_at, updated_at
                FROM tasks
                WHERE (?1 IS NULL OR state = ?1)
                ORDER BY created_at";
@@ -487,8 +504,10 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         verifiers: verifiers_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        graph_run_id: row.get(13)?,
+        graph_node_id: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
