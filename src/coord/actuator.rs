@@ -170,7 +170,11 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
 
             // Walk verifiers in declared order. Short-circuit on first
             // FAIL — RFC §5's verifier-is-the-gradient principle.
-            let cwd = std::path::PathBuf::from(&task.cwd);
+            let cwd = task
+                .workspace_path
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(&task.cwd));
             for verifier in &task.verifiers {
                 let verdict = run_verifier(fx, &cwd, verifier)?;
                 let verdict_str = match verdict.verdict {
