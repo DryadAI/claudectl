@@ -267,7 +267,60 @@ pub fn transition(
         params![task_id, from_state.as_str(), new_state.as_str(), cause, now],
     )
     .map_err(|e| format!("log transition: {e}"))?;
+
+    let graph_run_id: Option<String> = tx
+        .query_row(
+            "SELECT graph_run_id FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read graph run id: {e}"))?
+        .flatten();
+    if let Some(graph_run_id) = graph_run_id {
+        refresh_graph_run_state(&tx, &graph_run_id)?;
+    }
+
     tx.commit().map_err(|e| format!("commit: {e}"))?;
+    Ok(())
+}
+
+fn refresh_graph_run_state(conn: &Connection, graph_run_id: &str) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT state FROM tasks WHERE graph_run_id = ?1")
+        .map_err(|e| format!("prepare graph state: {e}"))?;
+    let rows = stmt
+        .query_map(params![graph_run_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query graph state: {e}"))?;
+    let mut states = Vec::new();
+    for row in rows {
+        states.push(row.map_err(|e| format!("graph state row: {e}"))?);
+    }
+
+    let state = if states.is_empty() {
+        "SUBMITTED"
+    } else if states.iter().all(|state| state == "DONE") {
+        "DONE"
+    } else if states.iter().any(|state| state == "NEEDS_HUMAN") {
+        "NEEDS_HUMAN"
+    } else if states.iter().any(|state| state == "CANCELLED") {
+        "CANCELLED"
+    } else if states.iter().any(|state| {
+        matches!(
+            state.as_str(),
+            "ASSIGNED" | "RUNNING" | "VERIFYING" | "RETRYING" | "RESUMING"
+        )
+    }) {
+        "RUNNING"
+    } else {
+        "PENDING"
+    };
+
+    conn.execute(
+        "UPDATE graph_runs SET state = ?1, updated_at = ?2 WHERE id = ?3",
+        params![state, now(), graph_run_id],
+    )
+    .map_err(|e| format!("update graph run state: {e}"))?;
     Ok(())
 }
 
