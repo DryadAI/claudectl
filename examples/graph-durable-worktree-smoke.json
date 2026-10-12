@@ -42,7 +42,6 @@
         "request": {
           "cwd": ".",
           "prompt": "Create a file named .claudectl-worktree-smoke.txt in the current workspace containing exactly: graph worktree isolation ok\\nDo not modify any other file. Do not commit, push, or use the network.",
-          "timeout_min": 10,
           "verify": [
             {
               "kind": "run",
