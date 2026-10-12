@@ -59,6 +59,8 @@ pub enum Action {
     /// downstream message body contains the same string the
     /// `task_transitions` row recorded.
     EscalateHuman { task_id: String, cause: String },
+    /// Retry a task after verifier failure using the recorded verifier output.
+    Retry { task_id: String },
     /// Resume an interrupted task (#347, RFC §7). The actuator marks
     /// `Resuming`, bumps the attempt counter, builds the recovery
     /// context (original prompt + verifier history + autopsy +
@@ -239,6 +241,7 @@ impl Supervisor {
         let pending = list_tasks(conn, Some(TaskState::Pending))?;
         let assigned = list_tasks(conn, Some(TaskState::Assigned))?;
         let running = list_tasks(conn, Some(TaskState::Running))?;
+        let retrying = list_tasks(conn, Some(TaskState::Retrying))?;
 
         // 1) Pending tasks are eligible only after every durable dependency
         //    task reaches DONE. A missing dependency, or one that terminates
@@ -260,7 +263,15 @@ impl Supervisor {
         // so a backlog can't push the fleet past `max_concurrent`.
         let in_flight = (assigned.len() + running.len()) as u32;
         if in_flight < self.policy.max_concurrent {
-            let slots = self.policy.max_concurrent - in_flight;
+            let mut slots = self.policy.max_concurrent - in_flight;
+
+            for task in retrying.iter().take(slots as usize) {
+                out.push(Action::Retry {
+                    task_id: task.id.clone(),
+                });
+                slots = slots.saturating_sub(1);
+            }
+
             for task in ready.into_iter().take(slots as usize) {
                 match &task.role {
                     Some(role) => out.push(Action::AssignViaMailbox {
@@ -612,6 +623,50 @@ mod tests {
             action,
             Action::EscalateHuman { task_id, cause }
                 if task_id == &downstream && cause.contains("dependency-terminal")
+        )));
+    }
+
+    #[test]
+    fn retrying_task_emits_retry_action() {
+        let mut conn = store::open_memory();
+        let task_id = insert_task(
+            &conn,
+            &NewTask {
+                name: "retry-me".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do work".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: Some(2),
+                timeout_min: None,
+                depends_on: vec![],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            &task_id,
+            TaskState::Pending,
+            TaskState::Retrying,
+            "test-retry",
+        )
+        .unwrap();
+
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Retry { task_id: id } if id == &task_id
         )));
     }
 
