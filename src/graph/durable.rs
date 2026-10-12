@@ -98,14 +98,14 @@ fn submit_with_connection(
             depends_on: dependency_ids,
             policy: Some(serde_json::json!({
                 "graph": {
-                    "run_id": graph_run_id,
-                    "graph_id": compiled.spec.id,
-                    "node_id": node.id,
-                    "fingerprint": compiled.fingerprint,
+                    "run_id": graph_run_id.as_str(),
+                    "graph_id": compiled.spec.id.as_str(),
+                    "node_id": node.id.as_str(),
+                    "fingerprint": compiled.fingerprint.as_str(),
                 },
-                "authority": node.authority,
+                "authority": &node.authority,
                 "risk": node.risk,
-                "requires": node.requires,
+                "requires": &node.requires,
             })),
             verifiers: request.verify,
         };
