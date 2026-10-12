@@ -1,15 +1,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The hooks we install into Claude Code's settings.json.
+/// Hooks installed into Claude Code's settings.json.
 ///
-/// We use `PostToolUse` with a wildcard matcher so claudectl sees every tool
-/// completion, and `Stop` to catch session endings. The commands call
-/// `claudectl --json` which is a lightweight, non-TUI snapshot that the
-/// brain / hooks system can consume.
-///
-/// We also wire up `PreToolUse` for Bash commands so claudectl's rule engine
-/// can evaluate deny rules before execution.
+/// The authority hook is silent for ordinary sessions and fail-closed for a
+/// supervisor-launched graph session. Ingest hooks feed the durable coord
+/// ledger; they are explicitly best-effort so telemetry can never block a
+/// user's normal Claude Code session.
 struct HookSpec {
     event: &'static str,
     matcher: &'static str,
@@ -20,20 +17,32 @@ struct HookSpec {
 const HOOKS: &[HookSpec] = &[
     HookSpec {
         event: "PreToolUse",
-        matcher: "Bash",
-        command: "claudectl --json 2>/dev/null || true",
+        matcher: "*",
+        command: "claudectl graph authorize-tool",
+        timeout: 5,
+    },
+    HookSpec {
+        event: "PreToolUse",
+        matcher: "*",
+        command: "claudectl ingest --hook PreToolUse 2>/dev/null || true",
         timeout: 5,
     },
     HookSpec {
         event: "PostToolUse",
         matcher: "*",
-        command: "claudectl --json 2>/dev/null || true",
+        command: "claudectl ingest --hook PostToolUse 2>/dev/null || true",
+        timeout: 5,
+    },
+    HookSpec {
+        event: "SessionStart",
+        matcher: "",
+        command: "claudectl ingest --hook SessionStart 2>/dev/null || true",
         timeout: 5,
     },
     HookSpec {
         event: "Stop",
         matcher: "",
-        command: "claudectl --json 2>/dev/null || true",
+        command: "claudectl ingest --hook Stop 2>/dev/null || true",
         timeout: 5,
     },
 ];
@@ -257,7 +266,12 @@ pub fn run_uninit(project: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Run the init command: write Claude Code hooks into settings.json.
+fn refresh_managed_hooks(settings: &mut serde_json::Value) {
+    remove_claudectl_hooks(settings);
+    merge_hooks(settings);
+}
+
+/// Run the init command: write or refresh Claude Code hooks in settings.json.
 pub fn run_init(project: bool, dry_run: bool) -> io::Result<()> {
     let path = settings_path(project);
 
@@ -286,15 +300,8 @@ pub fn run_init(project: bool, dry_run: bool) -> io::Result<()> {
         serde_json::json!({})
     };
 
-    // Check for existing claudectl hooks
-    if has_claudectl_hooks(&settings) {
-        println!("claudectl hooks already configured in {}", path.display());
-        println!("To re-initialize, run `claudectl init --remove` first.");
-        return Ok(());
-    }
-
-    // Merge hooks into settings
-    merge_hooks(&mut settings);
+    let had_managed_hooks = has_claudectl_hooks(&settings);
+    refresh_managed_hooks(&mut settings);
 
     if dry_run {
         // Show what would be written without actually writing
@@ -316,21 +323,27 @@ pub fn run_init(project: bool, dry_run: bool) -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     std::fs::write(&path, format!("{json}\n"))?;
 
-    print_success(&path);
+    print_success(&path, had_managed_hooks);
 
     Ok(())
 }
 
-fn print_success(path: &Path) {
-    println!("Initialized claudectl hooks in {}", path.display());
+fn print_success(path: &Path, refreshed: bool) {
+    println!(
+        "{} claudectl hooks in {}",
+        if refreshed { "Refreshed" } else { "Initialized" },
+        path.display()
+    );
     println!();
     println!("Hooks installed:");
-    println!("  PreToolUse (Bash)  — lets claudectl observe commands before execution");
-    println!("  PostToolUse (*)    — notifies claudectl after every tool completion");
-    println!("  Stop               — notifies claudectl when a session ends");
+    println!("  PreToolUse (*)  — enforces durable graph authority when a graph policy is present");
+    println!("  PreToolUse (*)  — ingests low-latency tool-start telemetry");
+    println!("  PostToolUse (*) — ingests tool-completion telemetry");
+    println!("  SessionStart    — records Claude session start");
+    println!("  Stop            — records turn/session completion for supervisor verification");
     println!();
-    println!("Claude Code will now notify claudectl on each tool use.");
-    println!("Run `claudectl` to start the dashboard.");
+    println!("Ordinary non-graph sessions are unaffected by the graph authority hook.");
+    println!("Run `claudectl --headless` to operate the durable supervisor.");
 }
 
 #[cfg(test)]
@@ -342,9 +355,9 @@ mod tests {
         let hooks = build_hooks_value();
         let obj = hooks.as_object().unwrap();
 
-        // Should have entries for PreToolUse, PostToolUse, and Stop
         assert!(obj.contains_key("PreToolUse"));
         assert!(obj.contains_key("PostToolUse"));
+        assert!(obj.contains_key("SessionStart"));
         assert!(obj.contains_key("Stop"));
 
         // Each event should have an array of matcher entries
@@ -359,6 +372,41 @@ mod tests {
                 assert!(inner[0]["command"].as_str().unwrap().contains("claudectl"));
             }
         }
+    }
+
+    #[test]
+    fn test_hook_set_contains_authority_and_lifecycle_ingest() {
+        let hooks = build_hooks_value();
+        let serialized = serde_json::to_string(&hooks).unwrap();
+        assert!(serialized.contains("claudectl graph authorize-tool"));
+        for event in ["PreToolUse", "PostToolUse", "SessionStart", "Stop"] {
+            assert!(
+                serialized.contains(&format!("claudectl ingest --hook {event}")),
+                "missing ingest hook for {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_replaces_old_managed_hooks_without_touching_third_party_hooks() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Write",
+                    "hooks": [{"type":"command","command":"echo third-party","timeout":5}]
+                }],
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{"type":"command","command":"claudectl --json 2>/dev/null || true","timeout":5}]
+                }]
+            }
+        });
+        refresh_managed_hooks(&mut settings);
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(serialized.contains("echo third-party"));
+        assert!(!serialized.contains("claudectl --json"));
+        assert!(serialized.contains("claudectl graph authorize-tool"));
+        assert!(serialized.contains("claudectl ingest --hook Stop"));
     }
 
     #[test]
@@ -439,9 +487,10 @@ mod tests {
 
         // Existing PreToolUse Write hook preserved
         let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 2); // original Write + new Bash
+        assert_eq!(pre.len(), 3); // original Write + authority + ingest
         assert_eq!(pre[0]["matcher"], "Write");
-        assert_eq!(pre[1]["matcher"], "Bash");
+        assert_eq!(pre[1]["matcher"], "*");
+        assert_eq!(pre[2]["matcher"], "*");
 
         // New hooks added
         assert!(settings["hooks"]["PostToolUse"].is_array());
@@ -491,7 +540,7 @@ mod tests {
         assert!(has_claudectl_hooks(&settings));
 
         let removed = remove_claudectl_hooks(&mut settings);
-        assert_eq!(removed, 3); // PreToolUse, PostToolUse, Stop
+        assert_eq!(removed, 5); // authority + four ingest hook entries
         assert!(!has_claudectl_hooks(&settings));
         // hooks key removed entirely when empty
         assert!(settings.get("hooks").is_none());
