@@ -22,7 +22,8 @@ use rusqlite::Connection;
 
 use super::supervisor::Action;
 use super::tasks::{
-    TaskState, attempt_count, get_task, insert_attempt, record_verification, transition,
+    TaskState, attempt_count, get_task, insert_attempt, record_verification, set_workspace_path,
+    transition,
 };
 use super::verify::{VerdictKind, VerifierBackend, run_verifier};
 
@@ -102,7 +103,17 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             // fallback), we bump the attempt counter so the mailbox
             // attempt and the spawn attempt are separately addressable.
             let next_num = attempt_count(conn, task_id)? + 1;
-            let session_id = fx.spawn_session(cwd, &task.prompt)?;
+            let launch_cwd = if task.graph_run_id.is_some() {
+                let workspace = super::workspace::prepare_task_workspace(&task)?;
+                let workspace_str = workspace.to_string_lossy().to_string();
+                if task.workspace_path.as_deref() != Some(workspace_str.as_str()) {
+                    set_workspace_path(conn, task_id, &workspace_str)?;
+                }
+                workspace
+            } else {
+                cwd.clone()
+            };
+            let session_id = fx.spawn_session(&launch_cwd, &task.prompt)?;
             let _attempt_id =
                 insert_attempt(conn, task_id, next_num, Some(&session_id), None, None)?;
             transition(
