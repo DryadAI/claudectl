@@ -158,7 +158,7 @@ fn submit_with_connection(
     let now = crate::logger::timestamp_now();
     tx.execute(
         "INSERT INTO graph_runs (id, graph_id, fingerprint, state, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'SUBMITTED', ?4, ?4)",
+         VALUES (?1, ?2, ?3, 'PENDING', ?4, ?4)",
         params![
             graph_run_id,
             compiled.spec.id,
@@ -380,6 +380,26 @@ mod tests {
         let status = status_with_connection(&conn, &submission.graph_run_id).unwrap();
         assert_eq!(status.effective_state, "PENDING");
         assert_eq!(status.nodes.len(), 2);
+
+        tasks::transition(
+            &mut conn,
+            a_id,
+            tasks::TaskState::Pending,
+            tasks::TaskState::Done,
+            "test-done",
+        )
+        .unwrap();
+        tasks::transition(
+            &mut conn,
+            b_id,
+            tasks::TaskState::Pending,
+            tasks::TaskState::Done,
+            "test-done",
+        )
+        .unwrap();
+        let status = status_with_connection(&conn, &submission.graph_run_id).unwrap();
+        assert_eq!(status.effective_state, "DONE");
+        assert_eq!(status.stored_state, "DONE");
     }
 
     #[test]
