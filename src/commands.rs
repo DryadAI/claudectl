@@ -1083,7 +1083,7 @@ pub(crate) fn run_headless(
         // sidesteps any lifetime tangle with the App's borrows.
         #[cfg(feature = "coord")]
         if let Ok(mut conn) = crate::coord::store::open() {
-            let sensors = NoopSensors;
+            let sensors = LiveSensors::from_app(&app);
             match supervisor.tick(&conn, &sensors) {
                 Ok(actions) if !actions.is_empty() => {
                     let mut actuated = 0u32;
@@ -1187,17 +1187,54 @@ fn emit_headless_event(event: &str, data: serde_json::Value, json_mode: bool) {
 /// Check for context rot and raise typed interrupts for decaying sessions.
 /// Sensor stub for headless mode while the live JSONL/`ps`/hook-event
 /// reader lands in PR4 (#346). Reports zero events seen and no sessions,
-/// which keeps `Supervisor::tick` in the "do nothing safely" branch — the
-/// crash-safety baseline before any actuation goes live.
+/// Live supervisor sensors derived from the same session snapshot the
+/// headless dashboard already refreshes. Hook completion is queried directly
+/// from coord.db by the reconciler; this surface is for process/session state.
 #[cfg(feature = "coord")]
-struct NoopSensors;
+struct LiveSensors {
+    observed: Vec<crate::coord::supervisor::ObservedSession>,
+}
+
 #[cfg(feature = "coord")]
-impl crate::coord::supervisor::Sensors for NoopSensors {
+impl LiveSensors {
+    fn from_app(app: &App) -> Self {
+        let observed = app
+            .sessions
+            .iter()
+            .map(|session| crate::coord::supervisor::ObservedSession {
+                session_id: session.session_id.clone(),
+                pid: session.pid,
+                status: match session.status {
+                    session::SessionStatus::Processing => {
+                        crate::coord::supervisor::ObservedStatus::Running
+                    }
+                    session::SessionStatus::NeedsInput
+                    | session::SessionStatus::WaitingInput
+                    | session::SessionStatus::Idle => {
+                        crate::coord::supervisor::ObservedStatus::Idle
+                    }
+                    session::SessionStatus::Finished => {
+                        crate::coord::supervisor::ObservedStatus::Dead
+                    }
+                    session::SessionStatus::Unknown => {
+                        crate::coord::supervisor::ObservedStatus::Unknown
+                    }
+                },
+                health_alerts: Vec::new(),
+            })
+            .collect();
+        Self { observed }
+    }
+}
+
+#[cfg(feature = "coord")]
+impl crate::coord::supervisor::Sensors for LiveSensors {
     fn last_hook_event_id(&self) -> i64 {
         0
     }
+
     fn observed_sessions(&self) -> Vec<crate::coord::supervisor::ObservedSession> {
-        Vec::new()
+        self.observed.clone()
     }
 }
 
@@ -1300,11 +1337,8 @@ impl crate::coord::actuator::SideEffects for LiveSideEffects {
             hop_count,
         )
     }
-    fn spawn_session(&self, _cwd: &std::path::Path, _prompt: &str) -> Result<String, String> {
-        // Spawn path lands in PR5 once `launch::launch` has a non-tty
-        // adapter; for now report a structured error so the reconciler
-        // can log + retry without taking the session-died code path.
-        Err("spawn fallback not implemented in PR4 — pending PR5 launch adapter".into())
+    fn spawn_session(&self, cwd: &std::path::Path, prompt: &str) -> Result<String, String> {
+        launch_supervised_session(cwd, prompt)
     }
 }
 
@@ -1346,8 +1380,44 @@ impl crate::coord::actuator::SideEffects for NoopSideEffects {
     ) -> Result<String, String> {
         Err("bus feature not compiled in; AssignViaMailbox is unavailable".into())
     }
-    fn spawn_session(&self, _cwd: &std::path::Path, _prompt: &str) -> Result<String, String> {
-        Err("spawn fallback not implemented in PR4".into())
+    fn spawn_session(&self, cwd: &std::path::Path, prompt: &str) -> Result<String, String> {
+        launch_supervised_session(cwd, prompt)
+    }
+}
+
+#[cfg(feature = "coord")]
+fn launch_supervised_session(cwd: &std::path::Path, prompt: &str) -> Result<String, String> {
+    let before: std::collections::HashSet<String> = discovery::scan_sessions()
+        .into_iter()
+        .map(|session| session.session_id)
+        .collect();
+
+    let request = launch::prepare(cwd.to_string_lossy().as_ref(), Some(prompt), None)?;
+    let _target = launch::launch(&request)?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let mut sessions = discovery::scan_sessions();
+        discovery::resolve_jsonl_paths(&mut sessions);
+
+        if let Some(session) = sessions.into_iter().find(|session| {
+            if before.contains(&session.session_id) {
+                return false;
+            }
+            std::path::Path::new(&session.cwd)
+                .canonicalize()
+                .is_ok_and(|session_cwd| session_cwd == request.cwd_path)
+        }) {
+            return Ok(session.session_id);
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Claude launch succeeded but no new session was discovered in '{}' within 15s",
+                request.cwd_path.display()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
