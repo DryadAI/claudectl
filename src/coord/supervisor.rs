@@ -401,7 +401,7 @@ fn session_cwd_matches(_session_id: &str, _task_cwd: &str) -> bool {
 mod tests {
     use super::*;
     use crate::coord::store;
-    use crate::coord::tasks::{NewTask, insert_task};
+    use crate::coord::tasks::{NewTask, insert_task, transition};
 
     struct StubSensors {
         last_id: i64,
