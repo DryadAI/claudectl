@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use super::tasks::{TaskState, list_tasks};
+use super::tasks::{TaskRow, TaskState, get_task, list_tasks};
 
 /// Actions the actuator carries out. Variants are the bridge between the
 /// pure reconciler and the real subsystems (bus mailbox, launcher, brain).
@@ -186,6 +186,34 @@ pub enum ObservedStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DependencyGate {
+    Ready,
+    Waiting,
+    Blocked(String),
+}
+
+fn dependency_gate(conn: &Connection, task: &TaskRow) -> Result<DependencyGate, String> {
+    for dependency_id in &task.depends_on {
+        let Some(dependency) = get_task(conn, dependency_id)? else {
+            return Ok(DependencyGate::Blocked(format!(
+                "dependency-missing:{dependency_id}"
+            )));
+        };
+        match dependency.state {
+            TaskState::Done => {}
+            TaskState::NeedsHuman | TaskState::Cancelled => {
+                return Ok(DependencyGate::Blocked(format!(
+                    "dependency-terminal:{dependency_id}:{}",
+                    dependency.state.as_str()
+                )));
+            }
+            _ => return Ok(DependencyGate::Waiting),
+        }
+    }
+    Ok(DependencyGate::Ready)
+}
+
 /// Reconciliation core. Reads desired state (`coord.tasks`), reads
 /// observed state from `sensors`, returns the action list. Pure — no
 /// I/O, no side effects, no writes to the DB.
@@ -212,18 +240,28 @@ impl Supervisor {
         let assigned = list_tasks(conn, Some(TaskState::Assigned))?;
         let running = list_tasks(conn, Some(TaskState::Running))?;
 
-        // 1) Pending tasks → emit assignment actions. Tasks with a role
-        //    go to that role's mailbox first; tasks without a role go
-        //    straight to spawn. Dependency resolution is deferred (M4
-        //    will gate this on `depends_on` rows reaching Done); for now
-        //    every Pending task is treated as Ready.
-        //
-        //    Hard ceiling on concurrent in-flight (Assigned + Running)
-        //    so a backlog can't push the fleet past `max_concurrent`.
+        // 1) Pending tasks are eligible only after every durable dependency
+        //    task reaches DONE. A missing dependency, or one that terminates
+        //    in NEEDS_HUMAN/CANCELLED, fails closed into operator escalation.
+        //    Dependencies are task IDs, never globally matched display names.
+        let mut ready = Vec::new();
+        for task in &pending {
+            match dependency_gate(conn, task)? {
+                DependencyGate::Ready => ready.push(task),
+                DependencyGate::Waiting => {}
+                DependencyGate::Blocked(cause) => out.push(Action::EscalateHuman {
+                    task_id: task.id.clone(),
+                    cause,
+                }),
+            }
+        }
+
+        // Hard ceiling on concurrent in-flight (Assigned + Running)
+        // so a backlog can't push the fleet past `max_concurrent`.
         let in_flight = (assigned.len() + running.len()) as u32;
         if in_flight < self.policy.max_concurrent {
             let slots = self.policy.max_concurrent - in_flight;
-            for task in pending.iter().take(slots as usize) {
+            for task in ready.into_iter().take(slots as usize) {
                 match &task.role {
                     Some(role) => out.push(Action::AssignViaMailbox {
                         task_id: task.id.clone(),
