@@ -215,6 +215,7 @@ mod tests {
             description: None,
             requires: vec![CAP_JAVASCRIPT_ANALYZE.into()],
             authority: super::super::schema::Authority::default(),
+            workspace: Default::default(),
             risk: super::super::schema::RiskLevel::Low,
             retry: super::super::schema::RetryPolicy::default(),
             inputs: vec![],
