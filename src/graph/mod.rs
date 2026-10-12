@@ -154,8 +154,8 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
                 );
             } else {
                 println!(
-                    "Graph run {}: {} ({})",
-                    status.graph_run_id, status.effective_state, status.graph_id
+                    "Graph run {}: {} / {:?} ({})",
+                    status.graph_run_id, status.effective_state, status.outcome, status.graph_id
                 );
                 println!("Fingerprint: {}", status.fingerprint);
                 for node in &status.nodes {
@@ -165,8 +165,12 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
                         .map(|(kind, verdict)| format!(" verify={kind}:{verdict}"))
                         .unwrap_or_default();
                     println!(
-                        "  {:<14} {} -> {}{}",
-                        node.state, node.node_id, node.task_id, verification
+                        "  {:<14} {:<8} {} -> {}{}",
+                        node.state,
+                        format!("{:?}", node.outcome).to_ascii_uppercase(),
+                        node.node_id,
+                        node.task_id,
+                        verification
                     );
                 }
             }
