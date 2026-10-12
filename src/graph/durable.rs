@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::compiler::CompiledGraph;
-use super::schema::{ExecutorSpec, NodeKind, NodeSpec};
+use super::schema::{ExecutorSpec, NodeKind, NodeSpec, Outcome};
 use crate::coord::store;
 use crate::coord::tasks::{self, NewTask};
 use crate::coord::verify::Verifier;
@@ -41,6 +41,7 @@ pub struct DurableNodeStatus {
     pub node_id: String,
     pub task_id: String,
     pub state: String,
+    pub outcome: Outcome,
     pub latest_verification: Option<(String, String)>,
 }
 
@@ -51,6 +52,7 @@ pub struct DurableRunStatus {
     pub fingerprint: String,
     pub stored_state: String,
     pub effective_state: String,
+    pub outcome: Outcome,
     pub nodes: Vec<DurableNodeStatus>,
 }
 
@@ -87,6 +89,7 @@ fn status_with_connection(
     let tasks = tasks::list_tasks_for_graph_run(conn, graph_run_id)?;
     let mut nodes = Vec::with_capacity(tasks.len());
     for task in &tasks {
+        let latest_verification = tasks::latest_verification(conn, &task.id)?;
         nodes.push(DurableNodeStatus {
             node_id: task
                 .graph_node_id
@@ -94,7 +97,8 @@ fn status_with_connection(
                 .unwrap_or_else(|| task.name.clone()),
             task_id: task.id.clone(),
             state: task.state.as_str().to_string(),
-            latest_verification: tasks::latest_verification(conn, &task.id)?,
+            outcome: task_outcome(task.state, latest_verification.as_ref()),
+            latest_verification,
         });
     }
 
@@ -128,14 +132,45 @@ fn status_with_connection(
     }
     .to_string();
 
+    let outcome = if nodes.iter().any(|node| node.outcome == Outcome::Error) {
+        Outcome::Error
+    } else if nodes.iter().any(|node| node.outcome == Outcome::Fail) {
+        Outcome::Fail
+    } else if !nodes.is_empty() && nodes.iter().all(|node| node.outcome == Outcome::Pass) {
+        Outcome::Pass
+    } else {
+        Outcome::Unknown
+    };
+
     Ok(DurableRunStatus {
         graph_run_id: graph_run_id.to_string(),
         graph_id: run.0,
         fingerprint: run.1,
         stored_state: run.2,
         effective_state,
+        outcome,
         nodes,
     })
+}
+
+fn task_outcome(
+    state: tasks::TaskState,
+    latest_verification: Option<&(String, String)>,
+) -> Outcome {
+    match state {
+        tasks::TaskState::Done => Outcome::Pass,
+        tasks::TaskState::Cancelled => Outcome::Error,
+        tasks::TaskState::NeedsHuman => {
+            if latest_verification
+                .is_some_and(|(_, verdict)| verdict.eq_ignore_ascii_case("FAIL"))
+            {
+                Outcome::Fail
+            } else {
+                Outcome::Unknown
+            }
+        }
+        _ => Outcome::Unknown,
+    }
 }
 
 fn submit_with_connection(
@@ -379,6 +414,7 @@ mod tests {
 
         let status = status_with_connection(&conn, &submission.graph_run_id).unwrap();
         assert_eq!(status.effective_state, "PENDING");
+        assert_eq!(status.outcome, Outcome::Unknown);
         assert_eq!(status.nodes.len(), 2);
 
         tasks::transition(
@@ -400,6 +436,26 @@ mod tests {
         let status = status_with_connection(&conn, &submission.graph_run_id).unwrap();
         assert_eq!(status.effective_state, "DONE");
         assert_eq!(status.stored_state, "DONE");
+        assert_eq!(status.outcome, Outcome::Pass);
+    }
+
+    #[test]
+    fn needs_human_with_failed_verifier_maps_to_fail() {
+        assert_eq!(
+            task_outcome(
+                tasks::TaskState::NeedsHuman,
+                Some(&("run".into(), "FAIL".into()))
+            ),
+            Outcome::Fail
+        );
+        assert_eq!(
+            task_outcome(tasks::TaskState::NeedsHuman, None),
+            Outcome::Unknown
+        );
+        assert_eq!(
+            task_outcome(tasks::TaskState::Cancelled, None),
+            Outcome::Error
+        );
     }
 
     #[test]
