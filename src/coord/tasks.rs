@@ -192,6 +192,30 @@ pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, String> 
     .map_err(|e| format!("get task: {e}"))
 }
 
+pub fn list_tasks_for_graph_run(
+    conn: &Connection,
+    graph_run_id: &str,
+) -> Result<Vec<TaskRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
+                    max_retries, timeout_min, depends_on, policy, verifiers,
+                    graph_run_id, graph_node_id, created_at, updated_at
+             FROM tasks
+             WHERE graph_run_id = ?1
+             ORDER BY graph_node_id, created_at",
+        )
+        .map_err(|e| format!("prepare graph run tasks: {e}"))?;
+    let rows = stmt
+        .query_map(params![graph_run_id], row_to_task)
+        .map_err(|e| format!("query graph run tasks: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("graph run task row: {e}"))?);
+    }
+    Ok(out)
+}
+
 pub fn list_tasks(conn: &Connection, state: Option<TaskState>) -> Result<Vec<TaskRow>, String> {
     let sql = "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                       max_retries, timeout_min, depends_on, policy, verifiers,
