@@ -68,7 +68,8 @@ pub fn gen_id(prefix: &str) -> String {
 /// v3 = supervisor verifier list on `tasks.verifiers` (#347).
 /// v4 = durable graph-run identity on supervisor tasks.
 /// v5 = persisted task workspace path for isolated graph execution.
-pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 5;
+/// v6 = per-attempt hook event cursor for race-free completion correlation.
+pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 6;
 
 /// Open (or create) the coordination database and run migrations.
 pub fn open() -> Result<Connection, String> {
@@ -387,6 +388,16 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     // this on the task makes spawn retries and daemon restarts reuse the same
     // isolated checkout instead of allocating a fresh worktree each time.
     ensure_column(conn, "tasks", "workspace_path", "workspace_path TEXT")?;
+
+    // Schema v6 — each attempt records the hook-event high-water mark from
+    // immediately before work starts. A Stop event completes an attempt only
+    // when its id is newer than this cursor.
+    ensure_column(
+        conn,
+        "task_attempts",
+        "hook_cursor",
+        "hook_cursor INTEGER NOT NULL DEFAULT 0",
+    )?;
 
     // Bump `user_version` last — table creation runs first so a partially
     // migrated DB never gets the version stamp; the gate then refuses to
@@ -1541,6 +1552,14 @@ mod tests {
         assert!(columns.contains(&"graph_run_id".to_string()));
         assert!(columns.contains(&"graph_node_id".to_string()));
         assert!(columns.contains(&"workspace_path".to_string()));
+
+        let mut stmt = conn.prepare("PRAGMA table_info(task_attempts)").unwrap();
+        let attempt_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(attempt_columns.contains(&"hook_cursor".to_string()));
     }
 
     #[test]
