@@ -332,16 +332,8 @@ impl Supervisor {
                 continue;
             };
 
-            if let (Some(attempt_id), Some(started_at)) = (
-                super::tasks::latest_attempt_id(conn, &task.id)?,
-                super::tasks::latest_attempt_started_at(conn, &task.id)?,
-            ) {
-                if super::hook_events::has_hook_for_session_since(
-                    conn,
-                    "Stop",
-                    &session_id,
-                    &started_at,
-                )? {
+            if let Some(attempt_id) = super::tasks::latest_attempt_id(conn, &task.id)? {
+                if super::hook_events::has_hook_for_session(conn, "Stop", &session_id)? {
                     out.push(Action::RunVerifier {
                         task_id: task.id.clone(),
                         attempt_id,
