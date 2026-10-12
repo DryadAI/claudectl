@@ -51,21 +51,14 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    let dirty = git_stdout(&repo_root, &["status", "--porcelain", "--untracked-files=normal"])?;
-    if !dirty.trim().is_empty() {
-        return Err(format!(
-            "source repository '{}' has uncommitted changes; durable worktree execution requires a clean source checkout",
-            repo_root.display()
-        ));
-    }
-    let base_commit = git_stdout(&repo_root, &["rev-parse", "HEAD"])?;
-    let base_commit = base_commit.trim().to_string();
-
     let target = workspace_root()
         .join(format!("{:016x}", fnv1a64(repo_root.to_string_lossy().as_bytes())))
         .join(sanitize_component(graph_run_id))
         .join(sanitize_component(graph_node_id));
 
+    // Crash-safe reuse: if the worktree already exists but workspace_path
+    // was not persisted before the process died, reuse it before consulting
+    // the mutable source checkout.
     if target.is_dir() && is_git_worktree(&target) {
         return target
             .canonicalize()
@@ -78,6 +71,17 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
             target.display()
         ));
     }
+
+    let dirty =
+        git_stdout(&repo_root, &["status", "--porcelain", "--untracked-files=normal"])?;
+    if !dirty.trim().is_empty() {
+        return Err(format!(
+            "source repository '{}' has uncommitted changes; durable worktree execution requires a clean source checkout",
+            repo_root.display()
+        ));
+    }
+    let base_commit = git_stdout(&repo_root, &["rev-parse", "HEAD"])?;
+    let base_commit = base_commit.trim().to_string();
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("create workspace parent '{}': {e}", parent.display()))?;
