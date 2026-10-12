@@ -35,14 +35,30 @@ pub fn authorize_stdin() -> io::Result<()> {
     };
 
     let policy = match session_policy::read_strict(session_id) {
-        Ok(Some(policy)) => policy,
-        Ok(None) => return Ok(()),
+        Ok(Some(policy)) => Some(policy),
+        Ok(None) => match std::env::current_dir()
+            .map_err(io::Error::other)
+            .and_then(|cwd| {
+                session_policy::read_workspace_strict(&cwd).map_err(io::Error::other)
+            })
+        {
+            Ok(policy) => policy,
+            Err(err) => {
+                emit_deny(&format!(
+                    "graph workspace authority policy could not be read safely: {err}"
+                ))?;
+                return Ok(());
+            }
+        },
         Err(err) => {
             emit_deny(&format!(
                 "graph authority policy could not be read safely: {err}"
             ))?;
             return Ok(());
         }
+    };
+    let Some(policy) = policy else {
+        return Ok(());
     };
     let Some(graph) = policy.graph.as_ref() else {
         return Ok(());
