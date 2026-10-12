@@ -432,6 +432,20 @@ pub fn latest_session_id(conn: &Connection, task_id: &str) -> Result<Option<Stri
 /// when transitioning Running → Verifying so the verifier rows attach
 /// to the right attempt. Mirrors `latest_attempt_age_minutes` but
 /// returns the id instead of the elapsed time.
+pub fn latest_attempt_hook_cursor(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT hook_cursor FROM task_attempts WHERE task_id = ?1
+         ORDER BY attempt_num DESC LIMIT 1",
+        params![task_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(|e| format!("latest attempt hook cursor: {e}"))
+}
+
 pub fn latest_attempt_id(conn: &Connection, task_id: &str) -> Result<Option<String>, String> {
     conn.query_row(
         "SELECT id FROM task_attempts WHERE task_id = ?1
@@ -475,12 +489,32 @@ pub fn insert_attempt(
     bus_message_id: Option<&str>,
     cwd_hash: Option<&str>,
 ) -> Result<String, String> {
+    insert_attempt_with_hook_cursor(
+        conn,
+        task_id,
+        attempt_num,
+        session_id,
+        bus_message_id,
+        cwd_hash,
+        0,
+    )
+}
+
+pub fn insert_attempt_with_hook_cursor(
+    conn: &Connection,
+    task_id: &str,
+    attempt_num: u32,
+    session_id: Option<&str>,
+    bus_message_id: Option<&str>,
+    cwd_hash: Option<&str>,
+    hook_cursor: i64,
+) -> Result<String, String> {
     let id = gen_id("attempt");
     let now = now();
     conn.execute(
         "INSERT INTO task_attempts
-            (id, task_id, attempt_num, session_id, bus_message_id, cwd_hash, started_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (id, task_id, attempt_num, session_id, bus_message_id, cwd_hash, started_at, hook_cursor)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             id,
             task_id,
@@ -489,6 +523,7 @@ pub fn insert_attempt(
             bus_message_id,
             cwd_hash,
             now,
+            hook_cursor,
         ],
     )
     .map_err(|e| format!("insert attempt: {e}"))?;
