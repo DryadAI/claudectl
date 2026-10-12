@@ -22,8 +22,8 @@ use rusqlite::Connection;
 
 use super::supervisor::Action;
 use super::tasks::{
-    TaskState, attempt_count, get_task, insert_attempt, record_verification, set_workspace_path,
-    transition,
+    TaskRow, TaskState, attempt_count, get_task, insert_attempt, latest_failed_verification,
+    record_verification, set_workspace_path, transition,
 };
 use super::verify::{VerdictKind, VerifierBackend, run_verifier};
 
@@ -104,12 +104,7 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             // attempt and the spawn attempt are separately addressable.
             let next_num = attempt_count(conn, task_id)? + 1;
             let launch_cwd = if task.graph_run_id.is_some() {
-                let workspace = super::workspace::prepare_task_workspace(&task)?;
-                let workspace_str = workspace.to_string_lossy().to_string();
-                if task.workspace_path.as_deref() != Some(workspace_str.as_str()) {
-                    set_workspace_path(conn, task_id, &workspace_str)?;
-                }
-                workspace
+                task_launch_cwd(conn, &task)?
             } else {
                 cwd.clone()
             };
@@ -224,6 +219,34 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             maybe_auto_post_pr(task_id);
             Ok(())
         }
+        Action::Retry { task_id } => {
+            let task =
+                get_task(conn, task_id)?.ok_or_else(|| format!("task {task_id} not found"))?;
+            if task.state != TaskState::Retrying {
+                return Ok(());
+            }
+            let (verifier_kind, verifier_output) = latest_failed_verification(conn, task_id)?
+                .ok_or_else(|| {
+                    format!(
+                        "task {task_id} is RETRYING but has no recorded failed verification"
+                    )
+                })?;
+            let retry_prompt =
+                retry_prompt_for_fail(&task.prompt, &verifier_kind, &verifier_output);
+            let launch_cwd = task_launch_cwd(conn, &task)?;
+            let next_num = attempt_count(conn, task_id)? + 1;
+            let session_id = fx.spawn_session(&launch_cwd, &retry_prompt)?;
+            let _attempt_id =
+                insert_attempt(conn, task_id, next_num, Some(&session_id), None, None)?;
+            transition(
+                conn,
+                task_id,
+                TaskState::Retrying,
+                TaskState::Running,
+                "retry-spawned",
+            )?;
+            Ok(())
+        }
         Action::Resume { task_id, cause } => {
             let task =
                 get_task(conn, task_id)?.ok_or_else(|| format!("task {task_id} not found"))?;
@@ -275,6 +298,21 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
         // panicking. Implementation lands with the resume protocol.
         Action::WriteSessionPolicy { .. } | Action::ClearSessionPolicy { .. } => Ok(()),
     }
+}
+
+fn task_launch_cwd(
+    conn: &Connection,
+    task: &TaskRow,
+) -> Result<std::path::PathBuf, String> {
+    if task.graph_run_id.is_none() {
+        return Ok(std::path::PathBuf::from(&task.cwd));
+    }
+    let workspace = super::workspace::prepare_task_workspace(task)?;
+    let workspace_str = workspace.to_string_lossy().to_string();
+    if task.workspace_path.as_deref() != Some(workspace_str.as_str()) {
+        set_workspace_path(conn, &task.id, &workspace_str)?;
+    }
+    Ok(workspace)
 }
 
 /// Compose the retry-prompt fed back to the agent on `Retrying`. The
@@ -639,6 +677,58 @@ mod tests {
         let hist = list_transitions(&conn, &id).unwrap();
         let last_cause = &hist.last().unwrap().2;
         assert_eq!(last_cause, "verify-fail");
+    }
+
+    #[test]
+    fn retry_action_uses_verifier_feedback_and_new_attempt() {
+        let mut conn = store::open_memory();
+        let new_task = NewTask {
+            verifiers: vec![crate::coord::verify::Verifier::Run {
+                command: "cargo test".into(),
+            }],
+            max_retries: Some(2),
+            ..sample_with_role(None)
+        };
+        let id = insert_task(&conn, &new_task).unwrap();
+        let attempt_id =
+            crate::coord::tasks::insert_attempt(&conn, &id, 1, Some("sess-old"), None, None)
+                .unwrap();
+        crate::coord::tasks::record_verification(
+            &conn,
+            &attempt_id,
+            "run",
+            "cargo test",
+            "FAIL",
+            "assertion failed",
+            0.0,
+        )
+        .unwrap();
+        crate::coord::tasks::transition(
+            &mut conn,
+            &id,
+            TaskState::Pending,
+            TaskState::Retrying,
+            "test-retry",
+        )
+        .unwrap();
+
+        let fx = RecordingFx::default();
+        apply(
+            &mut conn,
+            &fx,
+            &Action::Retry {
+                task_id: id.clone(),
+            },
+        )
+        .unwrap();
+
+        let task = get_task(&conn, &id).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Running);
+        assert_eq!(crate::coord::tasks::attempt_count(&conn, &id).unwrap(), 2);
+        let spawned = fx.spawned.borrow();
+        assert_eq!(spawned.len(), 1);
+        assert!(spawned[0].1.contains("assertion failed"));
+        assert!(spawned[0].1.contains("Previous attempt failed verification"));
     }
 
     #[test]
