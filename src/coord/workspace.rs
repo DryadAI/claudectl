@@ -50,6 +50,16 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
             repo_root.display()
         ));
     }
+    let canonical_repo_root = repo_root
+        .canonicalize()
+        .map_err(|e| format!("resolve repository root '{}': {e}", repo_root.display()))?;
+    if source != canonical_repo_root {
+        return Err(format!(
+            "durable worktree V1 requires request.cwd to be the Git repository root ('{}'), got '{}'",
+            canonical_repo_root.display(),
+            source.display()
+        ));
+    }
 
     let target = workspace_root()
         .join(format!("{:016x}", fnv1a64(repo_root.to_string_lossy().as_bytes())))
