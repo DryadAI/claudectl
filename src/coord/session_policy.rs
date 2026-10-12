@@ -41,6 +41,23 @@ pub struct SessionPolicy {
     pub task_id: String,
     pub approve_mode: ApproveMode,
     pub written_at: String,
+    #[serde(default)]
+    pub graph: Option<GraphSessionPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphSessionPolicy {
+    pub workspace_root: String,
+    #[serde(default)]
+    pub filesystem_read: Vec<String>,
+    #[serde(default)]
+    pub filesystem_write: Vec<String>,
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub git_commit: bool,
+    #[serde(default)]
+    pub git_push: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,16 +72,30 @@ pub enum ApproveMode {
 }
 
 /// `~/.claudectl/coord/session-policy/`. Created on demand by `write()`.
-pub fn dir() -> PathBuf {
+fn coord_home() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home)
-        .join(".claudectl")
-        .join("coord")
-        .join("session-policy")
+    PathBuf::from(home).join(".claudectl").join("coord")
+}
+
+pub fn dir() -> PathBuf {
+    coord_home().join("session-policy")
+}
+
+pub fn workspace_dir() -> PathBuf {
+    coord_home().join("workspace-policy")
 }
 
 fn file_path(dir: &Path, session_id: &str) -> PathBuf {
     dir.join(format!("{session_id}.json"))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// Write the per-session policy atomically. Uses a sibling tempfile +
@@ -91,6 +122,67 @@ pub fn write_at(target_dir: &Path, session_id: &str, policy: &SessionPolicy) -> 
 /// falls open to `Inherit` instead of failing closed.
 pub fn read(session_id: &str) -> Option<SessionPolicy> {
     read_at(&dir(), session_id)
+}
+
+pub fn write_workspace(workspace_root: &Path, policy: &SessionPolicy) -> io::Result<()> {
+    let canonical = workspace_root.canonicalize()?;
+    let target_dir = workspace_dir();
+    fs::create_dir_all(&target_dir)?;
+    let path = target_dir.join(format!("{:016x}.json", fnv1a64(canonical.to_string_lossy().as_bytes())));
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_vec_pretty(policy).map_err(io::Error::other)?;
+    {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&body)?;
+        file.sync_data()?;
+    }
+    fs::rename(tmp, path)
+}
+
+pub fn read_workspace_strict(cwd: &Path) -> Result<Option<SessionPolicy>, String> {
+    let canonical = cwd
+        .canonicalize()
+        .map_err(|e| format!("resolve workspace policy cwd '{}': {e}", cwd.display()))?;
+    for ancestor in canonical.ancestors() {
+        let path = workspace_dir().join(format!(
+            "{:016x}.json",
+            fnv1a64(ancestor.to_string_lossy().as_bytes())
+        ));
+        if !path.exists() {
+            continue;
+        }
+        let body = fs::read_to_string(&path)
+            .map_err(|e| format!("read workspace policy '{}': {e}", path.display()))?;
+        return serde_json::from_str(&body)
+            .map(Some)
+            .map_err(|e| format!("parse workspace policy '{}': {e}", path.display()));
+    }
+    Ok(None)
+}
+
+pub fn delete_workspace(workspace_root: &Path) -> io::Result<()> {
+    let canonical = workspace_root.canonicalize()?;
+    let path = workspace_dir().join(format!(
+        "{:016x}.json",
+        fnv1a64(canonical.to_string_lossy().as_bytes())
+    ));
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn read_strict(session_id: &str) -> Result<Option<SessionPolicy>, String> {
+    let path = file_path(&dir(), session_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(&path)
+        .map_err(|e| format!("read session policy '{}': {e}", path.display()))?;
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|e| format!("parse session policy '{}': {e}", path.display()))
 }
 
 pub fn read_at(target_dir: &Path, session_id: &str) -> Option<SessionPolicy> {
@@ -123,6 +215,7 @@ mod tests {
             task_id: task_id.into(),
             approve_mode: ApproveMode::ForceManual,
             written_at: "2026-06-09T12:00:00Z".into(),
+            graph: None,
         }
     }
 

@@ -66,7 +66,10 @@ pub fn gen_id(prefix: &str) -> String {
 /// v2 = supervisor tables (#345): tasks, task_attempts,
 ///       task_verifications, task_transitions, hook_events.
 /// v3 = supervisor verifier list on `tasks.verifiers` (#347).
-pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 3;
+/// v4 = durable graph-run identity on supervisor tasks.
+/// v5 = persisted task workspace path for isolated graph execution.
+/// v6 = per-attempt hook event cursor for race-free completion correlation.
+pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 6;
 
 /// Open (or create) the coordination database and run migrations.
 pub fn open() -> Result<Connection, String> {
@@ -353,12 +356,48 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         ",
     )?;
 
-    // Schema v3 — supervisor verifier gates (#345 PR5). Additive only:
-    // `tasks.verifiers` is a nullable JSON column carrying the task's
-    // gate list. Adding it doesn't break older binaries (they ignore
-    // unknown columns), so the version bump is for capability
-    // discovery rather than safety.
+    // Schema v3 — supervisor verifier gates (#345 PR5).
     ensure_column(conn, "tasks", "verifiers", "verifiers TEXT")?;
+
+    // Schema v4 — durable graph identity. The graph definition remains
+    // framework-neutral; only the compiled execution gets a run id and a
+    // node→task mapping. Dependencies stored on tasks are durable task IDs.
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS graph_runs (
+            id           TEXT PRIMARY KEY,
+            graph_id     TEXT NOT NULL,
+            fingerprint  TEXT NOT NULL,
+            state        TEXT NOT NULL DEFAULT 'PENDING',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_graph_runs_graph ON graph_runs(graph_id, created_at);
+        ",
+    )?;
+    ensure_column(conn, "tasks", "graph_run_id", "graph_run_id TEXT")?;
+    ensure_column(conn, "tasks", "graph_node_id", "graph_node_id TEXT")?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_graph_identity
+         ON tasks(graph_run_id, graph_node_id)
+         WHERE graph_run_id IS NOT NULL AND graph_node_id IS NOT NULL",
+        [],
+    )?;
+
+    // Schema v5 — materialized workspace selected by the actuator. Keeping
+    // this on the task makes spawn retries and daemon restarts reuse the same
+    // isolated checkout instead of allocating a fresh worktree each time.
+    ensure_column(conn, "tasks", "workspace_path", "workspace_path TEXT")?;
+
+    // Schema v6 — each attempt records the hook-event high-water mark from
+    // immediately before work starts. A Stop event completes an attempt only
+    // when its id is newer than this cursor.
+    ensure_column(
+        conn,
+        "task_attempts",
+        "hook_cursor",
+        "hook_cursor INTEGER NOT NULL DEFAULT 0",
+    )?;
 
     // Bump `user_version` last — table creation runs first so a partially
     // migrated DB never gets the version stamp; the gate then refuses to
@@ -1490,6 +1529,37 @@ mod tests {
                 .unwrap();
             assert!(exists, "v2 table missing: {table}");
         }
+    }
+
+    #[test]
+    fn v5_graph_identity_and_workspace_schema_exist_after_migrate() {
+        let conn = open_memory();
+        let graph_runs_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='graph_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(graph_runs_exists);
+
+        let mut stmt = conn.prepare("PRAGMA table_info(tasks)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(columns.contains(&"graph_run_id".to_string()));
+        assert!(columns.contains(&"graph_node_id".to_string()));
+        assert!(columns.contains(&"workspace_path".to_string()));
+
+        let mut stmt = conn.prepare("PRAGMA table_info(task_attempts)").unwrap();
+        let attempt_columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(attempt_columns.contains(&"hook_cursor".to_string()));
     }
 
     #[test]

@@ -175,9 +175,27 @@ fn run_from_file(path: &PathBuf, dry_run: bool) -> io::Result<()> {
         }
         return Ok(());
     }
-    let conn = store::open().map_err(io::Error::other)?;
-    let mut inserted = 0usize;
+    let mut conn = store::open().map_err(io::Error::other)?;
+    let ids: std::collections::HashMap<String, String> = parsed
+        .task
+        .iter()
+        .map(|entry| (entry.name.clone(), store::gen_id("task")))
+        .collect();
+
+    let tx = conn.transaction().map_err(io::Error::other)?;
     for entry in &parsed.task {
+        let depends_on = entry
+            .depends_on
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|name| {
+                ids.get(name)
+                    .cloned()
+                    .ok_or_else(|| io::Error::other(format!("unknown dependency name: {name}")))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
         let new_task = NewTask {
             name: entry.name.clone(),
             role: entry.role.clone(),
@@ -187,15 +205,25 @@ fn run_from_file(path: &PathBuf, dry_run: bool) -> io::Result<()> {
             budget_usd: entry.budget_usd,
             max_retries: entry.max_retries,
             timeout_min: entry.timeout_min,
-            depends_on: entry.depends_on.clone().unwrap_or_default(),
+            depends_on,
             policy: None,
             verifiers: entry.verify.clone().unwrap_or_default(),
         };
-        let id = tasks::insert_task(&conn, &new_task).map_err(io::Error::other)?;
-        println!("submitted {id} ({})", entry.name);
-        inserted += 1;
+        let id = ids
+            .get(&entry.name)
+            .expect("validated task name has preallocated id");
+        tasks::insert_task_with_identity(&tx, id, None, None, &new_task)
+            .map_err(io::Error::other)?;
     }
-    println!("{inserted} task(s) submitted");
+    tx.commit().map_err(io::Error::other)?;
+
+    for entry in &parsed.task {
+        let id = ids
+            .get(&entry.name)
+            .expect("validated task name has preallocated id");
+        println!("submitted {id} ({})", entry.name);
+    }
+    println!("{} task(s) submitted", parsed.task.len());
     Ok(())
 }
 
@@ -344,7 +372,7 @@ prompt = "Describe the work this agent should do."
 # budget_usd = 5.0             # per-task spend cap
 # max_retries = 2              # retry budget (default comes from config)
 # timeout_min = 30             # wall-clock timeout
-# depends_on = ["other-task"]  # run only after these task names finish
+# depends_on = ["other-task"]  # names are resolved to durable task IDs at submission
 
 # Verifier gates run in order on VERIFYING; the first FAIL stops the task.
 # [[task.verify]]

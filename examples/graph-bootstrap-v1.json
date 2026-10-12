@@ -1,0 +1,159 @@
+{
+  "version": 1,
+  "id": "claudectl-graph-bootstrap-v1",
+  "goal": "Prove the graph seed runner can validate, plan, test, and report on its own graph subsystem without cloud inference.",
+  "policy": {
+    "allow_network": false,
+    "allow_git_push": false,
+    "max_attempts_per_node": 2
+  },
+  "nodes": [
+    {
+      "id": "inventory",
+      "kind": "check",
+      "description": "Verify graph source files exist",
+      "requires": [
+        "shell.execute"
+      ],
+      "authority": {},
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "shell",
+        "command": "test -f src/graph/schema.rs && test -f src/graph/compiler.rs && test -f src/graph/runner.rs && test -f src/graph/mod.rs"
+      }
+    },
+    {
+      "id": "format",
+      "kind": "check",
+      "description": "Check Rust formatting",
+      "requires": [
+        "shell.execute"
+      ],
+      "authority": {},
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "shell",
+        "command": "cargo fmt --check"
+      }
+    },
+    {
+      "id": "test",
+      "kind": "check",
+      "description": "Test the graph subsystem",
+      "requires": [
+        "shell.execute"
+      ],
+      "authority": {},
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "shell",
+        "command": "cargo test graph::"
+      }
+    },
+    {
+      "id": "lint",
+      "kind": "check",
+      "description": "Lint all Rust targets",
+      "requires": [
+        "shell.execute"
+      ],
+      "authority": {},
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "shell",
+        "command": "cargo clippy --all-targets -- -D warnings"
+      }
+    },
+    {
+      "id": "approval",
+      "kind": "approval",
+      "description": "Approve graph subsystem as a candidate for integration; this does not merge or publish anything.",
+      "requires": [
+        "human.approval"
+      ],
+      "authority": {},
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": []
+    }
+  ],
+  "edges": [
+    {
+      "from": {
+        "node": "inventory"
+      },
+      "to": {
+        "node": "format"
+      },
+      "dependency_only": true
+    },
+    {
+      "from": {
+        "node": "inventory"
+      },
+      "to": {
+        "node": "test"
+      },
+      "dependency_only": true
+    },
+    {
+      "from": {
+        "node": "inventory"
+      },
+      "to": {
+        "node": "lint"
+      },
+      "dependency_only": true
+    },
+    {
+      "from": {
+        "node": "format"
+      },
+      "to": {
+        "node": "approval"
+      },
+      "dependency_only": true
+    },
+    {
+      "from": {
+        "node": "test"
+      },
+      "to": {
+        "node": "approval"
+      },
+      "dependency_only": true
+    },
+    {
+      "from": {
+        "node": "lint"
+      },
+      "to": {
+        "node": "approval"
+      },
+      "dependency_only": true
+    }
+  ]
+}

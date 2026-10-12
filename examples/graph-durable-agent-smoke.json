@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "id": "durable-agent-smoke-v1",
+  "goal": "Prove two dependent Claude Code agent tasks enter the durable supervisor ledger and execute in dependency order.",
+  "policy": {
+    "allow_network": false,
+    "allow_git_push": false,
+    "max_attempts_per_node": 2
+  },
+  "nodes": [
+    {
+      "id": "audit_graph_core",
+      "kind": "agent",
+      "description": "Read the graph core and report architectural risks without modifying files.",
+      "requires": [
+        "agent.execute"
+      ],
+      "authority": {
+        "filesystem_read": [
+          "src/graph/**"
+        ],
+        "filesystem_write": [],
+        "network": "denied",
+        "git_commit": false,
+        "git_push": false
+      },
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "provider",
+        "capability": "agent.execute",
+        "provider": "claude_code",
+        "request": {
+          "cwd": ".",
+          "prompt": "Inspect src/graph and report the three highest-risk correctness gaps in the current graph bootstrap implementation. Do not modify files.",
+          "verify": []
+        }
+      },
+      "workspace": {
+        "mode": "worktree"
+      }
+    },
+    {
+      "id": "audit_supervisor_bridge",
+      "kind": "agent",
+      "description": "Inspect the durable supervisor bridge only after the graph-core audit task is DONE.",
+      "requires": [
+        "agent.execute"
+      ],
+      "authority": {
+        "filesystem_read": [
+          "src/coord/**",
+          "src/graph/**"
+        ],
+        "filesystem_write": [],
+        "network": "denied",
+        "git_commit": false,
+        "git_push": false
+      },
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "provider",
+        "capability": "agent.execute",
+        "provider": "claude_code",
+        "request": {
+          "cwd": ".",
+          "prompt": "Inspect the graph-to-supervisor durability bridge and dependency gating. Report correctness risks and missing tests. Do not modify files.",
+          "verify": []
+        }
+      },
+      "workspace": {
+        "mode": "worktree"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": {
+        "node": "audit_graph_core"
+      },
+      "to": {
+        "node": "audit_supervisor_bridge"
+      },
+      "dependency_only": true
+    }
+  ]
+}

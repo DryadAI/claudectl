@@ -93,6 +93,9 @@ pub struct TaskRow {
     /// short-circuit on first FAIL. Empty list ⇒ the task graduates to
     /// DONE as soon as the session ends — gates are opt-in.
     pub verifiers: Vec<super::verify::Verifier>,
+    pub graph_run_id: Option<String>,
+    pub graph_node_id: Option<String>,
+    pub workspace_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -116,6 +119,20 @@ pub struct NewTask {
 
 pub fn insert_task(conn: &Connection, t: &NewTask) -> Result<String, String> {
     let id = gen_id("task");
+    insert_task_with_identity(conn, &id, None, None, t)?;
+    Ok(id)
+}
+
+/// Insert a task with a caller-supplied durable id and optional graph identity.
+/// Graph submission preallocates every task id first so dependency edges can be
+/// stored as unambiguous task ids in one transaction.
+pub fn insert_task_with_identity(
+    conn: &Connection,
+    id: &str,
+    graph_run_id: Option<&str>,
+    graph_node_id: Option<&str>,
+    t: &NewTask,
+) -> Result<(), String> {
     let now = now();
     let depends_on = serde_json::to_string(&t.depends_on).map_err(|e| format!("json: {e}"))?;
     let policy = t
@@ -131,8 +148,9 @@ pub fn insert_task(conn: &Connection, t: &NewTask) -> Result<String, String> {
     conn.execute(
         "INSERT INTO tasks (id, name, state, role, cwd, prompt, model, budget_usd,
                             max_retries, timeout_min, depends_on, policy, verifiers,
-                            created_at, updated_at)
-         VALUES (?1, ?2, 'PENDING', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+                            graph_run_id, graph_node_id, workspace_path, created_at, updated_at)
+         VALUES (?1, ?2, 'PENDING', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                 ?13, ?14, NULL, ?15, ?15)",
         params![
             id,
             t.name,
@@ -146,27 +164,27 @@ pub fn insert_task(conn: &Connection, t: &NewTask) -> Result<String, String> {
             depends_on,
             policy,
             verifiers,
+            graph_run_id,
+            graph_node_id,
             now,
         ],
     )
     .map_err(|e| format!("insert task: {e}"))?;
-    // Initial transition log entry — null `from_state` would break the NOT NULL
-    // constraint, so we write the synthetic 'CREATED' bookmark.
     log_transition(
         conn,
-        &id,
+        id,
         "CREATED",
         TaskState::Pending.as_str(),
         "submitted",
     )?;
-    Ok(id)
+    Ok(())
 }
 
 pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, String> {
     conn.query_row(
         "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                 max_retries, timeout_min, depends_on, policy, verifiers,
-                created_at, updated_at
+                graph_run_id, graph_node_id, workspace_path, created_at, updated_at
          FROM tasks WHERE id = ?1",
         params![id],
         row_to_task,
@@ -175,10 +193,47 @@ pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, String> 
     .map_err(|e| format!("get task: {e}"))
 }
 
+pub fn list_tasks_for_graph_run(
+    conn: &Connection,
+    graph_run_id: &str,
+) -> Result<Vec<TaskRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
+                    max_retries, timeout_min, depends_on, policy, verifiers,
+                    graph_run_id, graph_node_id, workspace_path, created_at, updated_at
+             FROM tasks
+             WHERE graph_run_id = ?1
+             ORDER BY graph_node_id, created_at",
+        )
+        .map_err(|e| format!("prepare graph run tasks: {e}"))?;
+    let rows = stmt
+        .query_map(params![graph_run_id], row_to_task)
+        .map_err(|e| format!("query graph run tasks: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("graph run task row: {e}"))?);
+    }
+    Ok(out)
+}
+
+pub fn set_workspace_path(
+    conn: &Connection,
+    task_id: &str,
+    workspace_path: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE tasks SET workspace_path = ?1, updated_at = ?2 WHERE id = ?3",
+        params![workspace_path, now(), task_id],
+    )
+    .map_err(|e| format!("set workspace path: {e}"))?;
+    Ok(())
+}
+
 pub fn list_tasks(conn: &Connection, state: Option<TaskState>) -> Result<Vec<TaskRow>, String> {
     let sql = "SELECT id, name, state, role, cwd, prompt, model, budget_usd,
                       max_retries, timeout_min, depends_on, policy, verifiers,
-                      created_at, updated_at
+                      graph_run_id, graph_node_id, workspace_path, created_at, updated_at
                FROM tasks
                WHERE (?1 IS NULL OR state = ?1)
                ORDER BY created_at";
@@ -226,7 +281,60 @@ pub fn transition(
         params![task_id, from_state.as_str(), new_state.as_str(), cause, now],
     )
     .map_err(|e| format!("log transition: {e}"))?;
+
+    let graph_run_id: Option<String> = tx
+        .query_row(
+            "SELECT graph_run_id FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read graph run id: {e}"))?
+        .flatten();
+    if let Some(graph_run_id) = graph_run_id {
+        refresh_graph_run_state(&tx, &graph_run_id)?;
+    }
+
     tx.commit().map_err(|e| format!("commit: {e}"))?;
+    Ok(())
+}
+
+fn refresh_graph_run_state(conn: &Connection, graph_run_id: &str) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT state FROM tasks WHERE graph_run_id = ?1")
+        .map_err(|e| format!("prepare graph state: {e}"))?;
+    let rows = stmt
+        .query_map(params![graph_run_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query graph state: {e}"))?;
+    let mut states = Vec::new();
+    for row in rows {
+        states.push(row.map_err(|e| format!("graph state row: {e}"))?);
+    }
+
+    let state = if states.is_empty() {
+        "SUBMITTED"
+    } else if states.iter().all(|state| state == "DONE") {
+        "DONE"
+    } else if states.iter().any(|state| state == "NEEDS_HUMAN") {
+        "NEEDS_HUMAN"
+    } else if states.iter().any(|state| state == "CANCELLED") {
+        "CANCELLED"
+    } else if states.iter().any(|state| {
+        matches!(
+            state.as_str(),
+            "ASSIGNED" | "RUNNING" | "VERIFYING" | "RETRYING" | "RESUMING"
+        )
+    }) {
+        "RUNNING"
+    } else {
+        "PENDING"
+    };
+
+    conn.execute(
+        "UPDATE graph_runs SET state = ?1, updated_at = ?2 WHERE id = ?3",
+        params![state, now(), graph_run_id],
+    )
+    .map_err(|e| format!("update graph run state: {e}"))?;
     Ok(())
 }
 
@@ -256,6 +364,24 @@ pub fn record_verification(
 /// Most recent verifier `(kind, verdict)` for a task, across all its attempts
 /// (#368/#369). Joins `task_verifications` → `task_attempts` on `attempt_id`
 /// and takes the newest by `ran_at`. `None` when no verifier has run yet.
+pub fn latest_failed_verification(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    conn.query_row(
+        "SELECT v.kind, COALESCE(v.output, '')
+         FROM task_verifications v
+         JOIN task_attempts a ON a.id = v.attempt_id
+         WHERE a.task_id = ?1 AND v.verdict = 'FAIL'
+         ORDER BY v.ran_at DESC, v.id DESC
+         LIMIT 1",
+        params![task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| format!("latest failed verification: {e}"))
+}
+
 pub fn latest_verification(
     conn: &Connection,
     task_id: &str,
@@ -306,6 +432,20 @@ pub fn latest_session_id(conn: &Connection, task_id: &str) -> Result<Option<Stri
 /// when transitioning Running → Verifying so the verifier rows attach
 /// to the right attempt. Mirrors `latest_attempt_age_minutes` but
 /// returns the id instead of the elapsed time.
+pub fn latest_attempt_hook_cursor(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT hook_cursor FROM task_attempts WHERE task_id = ?1
+         ORDER BY attempt_num DESC LIMIT 1",
+        params![task_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(|e| format!("latest attempt hook cursor: {e}"))
+}
+
 pub fn latest_attempt_id(conn: &Connection, task_id: &str) -> Result<Option<String>, String> {
     conn.query_row(
         "SELECT id FROM task_attempts WHERE task_id = ?1
@@ -349,12 +489,32 @@ pub fn insert_attempt(
     bus_message_id: Option<&str>,
     cwd_hash: Option<&str>,
 ) -> Result<String, String> {
+    insert_attempt_with_hook_cursor(
+        conn,
+        task_id,
+        attempt_num,
+        session_id,
+        bus_message_id,
+        cwd_hash,
+        0,
+    )
+}
+
+pub fn insert_attempt_with_hook_cursor(
+    conn: &Connection,
+    task_id: &str,
+    attempt_num: u32,
+    session_id: Option<&str>,
+    bus_message_id: Option<&str>,
+    cwd_hash: Option<&str>,
+    hook_cursor: i64,
+) -> Result<String, String> {
     let id = gen_id("attempt");
     let now = now();
     conn.execute(
         "INSERT INTO task_attempts
-            (id, task_id, attempt_num, session_id, bus_message_id, cwd_hash, started_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (id, task_id, attempt_num, session_id, bus_message_id, cwd_hash, started_at, hook_cursor)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             id,
             task_id,
@@ -363,6 +523,7 @@ pub fn insert_attempt(
             bus_message_id,
             cwd_hash,
             now,
+            hook_cursor,
         ],
     )
     .map_err(|e| format!("insert attempt: {e}"))?;
@@ -487,8 +648,11 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         verifiers: verifiers_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        graph_run_id: row.get(13)?,
+        graph_node_id: row.get(14)?,
+        workspace_path: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
@@ -539,6 +703,27 @@ mod tests {
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].0, "CREATED");
         assert_eq!(hist[0].1, "PENDING");
+    }
+
+    #[test]
+    fn graph_task_identity_round_trips() {
+        let conn = open_memory_for_tests();
+        insert_task_with_identity(
+            &conn,
+            "task_graph_1",
+            Some("graph_run_1"),
+            Some("node_a"),
+            &sample(),
+        )
+        .unwrap();
+
+        let got = get_task(&conn, "task_graph_1").unwrap().unwrap();
+        assert_eq!(got.graph_run_id.as_deref(), Some("graph_run_1"));
+        assert_eq!(got.graph_node_id.as_deref(), Some("node_a"));
+        assert_eq!(got.workspace_path, None);
+        set_workspace_path(&conn, "task_graph_1", "/tmp/worktree").unwrap();
+        let got = get_task(&conn, "task_graph_1").unwrap().unwrap();
+        assert_eq!(got.workspace_path.as_deref(), Some("/tmp/worktree"));
     }
 
     #[test]

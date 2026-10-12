@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "rea-capability-smoke-test",
+  "goal": "Verify claudectl can resolve REA as a capability provider and preserve its machine-readable evidence.",
+  "policy": {
+    "allow_network": false,
+    "allow_git_push": false,
+    "max_attempts_per_node": 1
+  },
+  "nodes": [
+    {
+      "id": "discover_rea",
+      "kind": "tool",
+      "description": "Ask the locally installed REA CLI for its advertised capabilities.",
+      "requires": [
+        "reverse.capabilities.discover"
+      ],
+      "authority": {},
+      "risk": "low",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "provider",
+        "capability": "reverse.capabilities.discover",
+        "provider": "rea",
+        "request": {}
+      }
+    }
+  ],
+  "edges": []
+}

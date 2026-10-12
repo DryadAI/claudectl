@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use super::tasks::{TaskState, list_tasks};
+use super::tasks::{TaskRow, TaskState, get_task, list_tasks};
 
 /// Actions the actuator carries out. Variants are the bridge between the
 /// pure reconciler and the real subsystems (bus mailbox, launcher, brain).
@@ -59,6 +59,8 @@ pub enum Action {
     /// downstream message body contains the same string the
     /// `task_transitions` row recorded.
     EscalateHuman { task_id: String, cause: String },
+    /// Retry a task after verifier failure using the recorded verifier output.
+    Retry { task_id: String },
     /// Resume an interrupted task (#347, RFC §7). The actuator marks
     /// `Resuming`, bumps the attempt counter, builds the recovery
     /// context (original prompt + verifier history + autopsy +
@@ -186,6 +188,34 @@ pub enum ObservedStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DependencyGate {
+    Ready,
+    Waiting,
+    Blocked(String),
+}
+
+fn dependency_gate(conn: &Connection, task: &TaskRow) -> Result<DependencyGate, String> {
+    for dependency_id in &task.depends_on {
+        let Some(dependency) = get_task(conn, dependency_id)? else {
+            return Ok(DependencyGate::Blocked(format!(
+                "dependency-missing:{dependency_id}"
+            )));
+        };
+        match dependency.state {
+            TaskState::Done => {}
+            TaskState::NeedsHuman | TaskState::Cancelled => {
+                return Ok(DependencyGate::Blocked(format!(
+                    "dependency-terminal:{dependency_id}:{}",
+                    dependency.state.as_str()
+                )));
+            }
+            _ => return Ok(DependencyGate::Waiting),
+        }
+    }
+    Ok(DependencyGate::Ready)
+}
+
 /// Reconciliation core. Reads desired state (`coord.tasks`), reads
 /// observed state from `sensors`, returns the action list. Pure — no
 /// I/O, no side effects, no writes to the DB.
@@ -211,19 +241,38 @@ impl Supervisor {
         let pending = list_tasks(conn, Some(TaskState::Pending))?;
         let assigned = list_tasks(conn, Some(TaskState::Assigned))?;
         let running = list_tasks(conn, Some(TaskState::Running))?;
+        let retrying = list_tasks(conn, Some(TaskState::Retrying))?;
 
-        // 1) Pending tasks → emit assignment actions. Tasks with a role
-        //    go to that role's mailbox first; tasks without a role go
-        //    straight to spawn. Dependency resolution is deferred (M4
-        //    will gate this on `depends_on` rows reaching Done); for now
-        //    every Pending task is treated as Ready.
-        //
-        //    Hard ceiling on concurrent in-flight (Assigned + Running)
-        //    so a backlog can't push the fleet past `max_concurrent`.
+        // 1) Pending tasks are eligible only after every durable dependency
+        //    task reaches DONE. A missing dependency, or one that terminates
+        //    in NEEDS_HUMAN/CANCELLED, fails closed into operator escalation.
+        //    Dependencies are task IDs, never globally matched display names.
+        let mut ready = Vec::new();
+        for task in &pending {
+            match dependency_gate(conn, task)? {
+                DependencyGate::Ready => ready.push(task),
+                DependencyGate::Waiting => {}
+                DependencyGate::Blocked(cause) => out.push(Action::EscalateHuman {
+                    task_id: task.id.clone(),
+                    cause,
+                }),
+            }
+        }
+
+        // Hard ceiling on concurrent in-flight (Assigned + Running)
+        // so a backlog can't push the fleet past `max_concurrent`.
         let in_flight = (assigned.len() + running.len()) as u32;
         if in_flight < self.policy.max_concurrent {
-            let slots = self.policy.max_concurrent - in_flight;
-            for task in pending.iter().take(slots as usize) {
+            let mut slots = self.policy.max_concurrent - in_flight;
+
+            for task in retrying.iter().take(slots as usize) {
+                out.push(Action::Retry {
+                    task_id: task.id.clone(),
+                });
+                slots = slots.saturating_sub(1);
+            }
+
+            for task in ready.into_iter().take(slots as usize) {
                 match &task.role {
                     Some(role) => out.push(Action::AssignViaMailbox {
                         task_id: task.id.clone(),
@@ -282,6 +331,25 @@ impl Supervisor {
             let Some(session_id) = session_id else {
                 continue;
             };
+
+            if let (Some(attempt_id), Some(hook_cursor)) = (
+                super::tasks::latest_attempt_id(conn, &task.id)?,
+                super::tasks::latest_attempt_hook_cursor(conn, &task.id)?,
+            ) {
+                if super::hook_events::has_hook_for_session_after(
+                    conn,
+                    "Stop",
+                    &session_id,
+                    hook_cursor,
+                )? {
+                    out.push(Action::RunVerifier {
+                        task_id: task.id.clone(),
+                        attempt_id,
+                    });
+                    continue;
+                }
+            }
+
             let Some(session) = observed_by_session.get(session_id.as_str()) else {
                 continue;
             };
@@ -363,7 +431,7 @@ fn session_cwd_matches(_session_id: &str, _task_cwd: &str) -> bool {
 mod tests {
     use super::*;
     use crate::coord::store;
-    use crate::coord::tasks::{NewTask, insert_task};
+    use crate::coord::tasks::{NewTask, insert_attempt, insert_task, transition};
 
     struct StubSensors {
         last_id: i64,
@@ -389,6 +457,316 @@ mod tests {
         };
         let actions = sup.tick(&conn, &sensors).unwrap();
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn pending_task_waits_for_dependency_then_runs_after_done() {
+        let mut conn = store::open_memory();
+        let upstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "upstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do upstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+        let downstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "downstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do downstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![upstream.clone()],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+
+        let sup = Supervisor::with_defaults();
+        let sensors = StubSensors {
+            last_id: 0,
+            sessions: vec![],
+        };
+        let actions = sup.tick(&conn, &sensors).unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Spawn { task_id, .. } if task_id == &upstream
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            Action::Spawn { task_id, .. } if task_id == &downstream
+        )));
+
+        transition(
+            &mut conn,
+            &upstream,
+            TaskState::Pending,
+            TaskState::Done,
+            "test-complete",
+        )
+        .unwrap();
+        let actions = sup.tick(&conn, &sensors).unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Spawn { task_id, .. } if task_id == &downstream
+        )));
+    }
+
+    #[test]
+    fn pending_task_escalates_on_missing_dependency() {
+        let conn = store::open_memory();
+        let task_id = insert_task(
+            &conn,
+            &NewTask {
+                name: "blocked".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do blocked".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec!["task_does_not_exist".into()],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::EscalateHuman { task_id: id, cause }
+                if id == &task_id && cause.contains("dependency-missing")
+        )));
+    }
+
+    #[test]
+    fn pending_task_escalates_when_dependency_needs_human() {
+        let mut conn = store::open_memory();
+        let upstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "upstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do upstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            &upstream,
+            TaskState::Pending,
+            TaskState::NeedsHuman,
+            "test-blocked",
+        )
+        .unwrap();
+        let downstream = insert_task(
+            &conn,
+            &NewTask {
+                name: "downstream".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do downstream".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![upstream],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::EscalateHuman { task_id, cause }
+                if task_id == &downstream && cause.contains("dependency-terminal")
+        )));
+    }
+
+    #[test]
+    fn retrying_task_emits_retry_action() {
+        let mut conn = store::open_memory();
+        let task_id = insert_task(
+            &conn,
+            &NewTask {
+                name: "retry-me".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do work".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: Some(2),
+                timeout_min: None,
+                depends_on: vec![],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            &task_id,
+            TaskState::Pending,
+            TaskState::Retrying,
+            "test-retry",
+        )
+        .unwrap();
+
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Retry { task_id: id } if id == &task_id
+        )));
+    }
+
+    #[test]
+    fn stop_hook_for_latest_attempt_emits_verifier() {
+        let mut conn = store::open_memory();
+        let task_id = insert_task(
+            &conn,
+            &NewTask {
+                name: "verify-me".into(),
+                role: None,
+                cwd: "/work/x".into(),
+                prompt: "do work".into(),
+                model: None,
+                budget_usd: None,
+                max_retries: None,
+                timeout_min: None,
+                depends_on: vec![],
+                policy: None,
+                verifiers: vec![],
+            },
+        )
+        .unwrap();
+        transition(
+            &mut conn,
+            &task_id,
+            TaskState::Pending,
+            TaskState::Running,
+            "test-running",
+        )
+        .unwrap();
+        crate::coord::hook_events::append(
+            &conn,
+            &crate::coord::hook_events::HookEvent {
+                id: None,
+                hook: "Stop".into(),
+                session_id: Some("sess-stop".into()),
+                tool: None,
+                payload: "{}".into(),
+                ingested_at: crate::logger::timestamp_now(),
+            },
+        )
+        .unwrap();
+        let cursor = crate::coord::hook_events::latest_id(&conn).unwrap();
+        let attempt_id = crate::coord::tasks::insert_attempt_with_hook_cursor(
+            &conn,
+            &task_id,
+            1,
+            Some("sess-stop"),
+            None,
+            None,
+            cursor,
+        )
+        .unwrap();
+
+        // A Stop that predates the attempt cursor must not complete it.
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            Action::RunVerifier { task_id: id, .. } if id == &task_id
+        )));
+
+        crate::coord::hook_events::append(
+            &conn,
+            &crate::coord::hook_events::HookEvent {
+                id: None,
+                hook: "Stop".into(),
+                session_id: Some("sess-stop".into()),
+                tool: None,
+                payload: "{}".into(),
+                ingested_at: crate::logger::timestamp_now(),
+            },
+        )
+        .unwrap();
+
+        let actions = Supervisor::with_defaults()
+            .tick(
+                &conn,
+                &StubSensors {
+                    last_id: 0,
+                    sessions: vec![],
+                },
+            )
+            .unwrap();
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::RunVerifier {
+                task_id: id,
+                attempt_id: attempt
+            } if id == &task_id && attempt == &attempt_id
+        )));
     }
 
     #[test]

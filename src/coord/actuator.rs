@@ -22,7 +22,9 @@ use rusqlite::Connection;
 
 use super::supervisor::Action;
 use super::tasks::{
-    TaskState, attempt_count, get_task, insert_attempt, record_verification, transition,
+    TaskRow, TaskState, attempt_count, get_task, insert_attempt,
+    insert_attempt_with_hook_cursor, latest_failed_verification, latest_session_id,
+    record_verification, set_workspace_path, transition,
 };
 use super::verify::{VerdictKind, VerifierBackend, run_verifier};
 
@@ -48,6 +50,9 @@ pub trait SideEffects: VerifierBackend {
     /// returned session_id as durable — restarting the daemon shouldn't
     /// re-spawn the same task.
     fn spawn_session(&self, cwd: &std::path::Path, prompt: &str) -> Result<String, String>;
+
+    /// Continue an existing Claude Code session with a new prompt.
+    fn send_input(&self, session_id: &str, text: &str) -> Result<(), String>;
 }
 
 /// Carry out one action against the SQL store and the side-effect
@@ -102,9 +107,35 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             // fallback), we bump the attempt counter so the mailbox
             // attempt and the spawn attempt are separately addressable.
             let next_num = attempt_count(conn, task_id)? + 1;
-            let session_id = fx.spawn_session(cwd, &task.prompt)?;
-            let _attempt_id =
-                insert_attempt(conn, task_id, next_num, Some(&session_id), None, None)?;
+            let launch_cwd = if task.graph_run_id.is_some() {
+                task_launch_cwd(conn, &task)?
+            } else {
+                cwd.clone()
+            };
+            let graph_policy = graph_session_policy(&task, &launch_cwd)?;
+            if let Some(policy) = graph_policy.as_ref() {
+                super::session_policy::write_workspace(&launch_cwd, policy)
+                    .map_err(|e| format!("write graph workspace policy: {e}"))?;
+            }
+            let hook_cursor = super::hook_events::latest_id(conn)?;
+            let session_id = fx.spawn_session(&launch_cwd, &task.prompt)?;
+            if let Some(policy) = graph_policy.as_ref() {
+                let _ = super::session_policy::write(&session_id, policy);
+            }
+            let cwd_hash = if task.graph_run_id.is_some() {
+                Some(super::workspace::workspace_revision(&launch_cwd)?)
+            } else {
+                None
+            };
+            let _attempt_id = insert_attempt_with_hook_cursor(
+                conn,
+                task_id,
+                next_num,
+                Some(&session_id),
+                None,
+                cwd_hash.as_deref(),
+                hook_cursor,
+            )?;
             transition(
                 conn,
                 task_id,
@@ -159,9 +190,20 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
 
             // Walk verifiers in declared order. Short-circuit on first
             // FAIL — RFC §5's verifier-is-the-gradient principle.
-            let cwd = std::path::PathBuf::from(&task.cwd);
+            let cwd = task
+                .workspace_path
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(&task.cwd));
             for verifier in &task.verifiers {
-                let verdict = run_verifier(fx, &cwd, verifier)?;
+                let verdict = match run_verifier(fx, &cwd, verifier) {
+                    Ok(verdict) => verdict,
+                    Err(err) => crate::coord::verify::Verdict {
+                        verdict: VerdictKind::Fail,
+                        output: format!("verifier backend error: {err}"),
+                        cost_usd: 0.0,
+                    },
+                };
                 let verdict_str = match verdict.verdict {
                     VerdictKind::Pass => "PASS",
                     VerdictKind::Fail => "FAIL",
@@ -207,6 +249,54 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 "verify-pass",
             )?;
             maybe_auto_post_pr(task_id);
+            Ok(())
+        }
+        Action::Retry { task_id } => {
+            let task =
+                get_task(conn, task_id)?.ok_or_else(|| format!("task {task_id} not found"))?;
+            if task.state != TaskState::Retrying {
+                return Ok(());
+            }
+            let (verifier_kind, verifier_output) = latest_failed_verification(conn, task_id)?
+                .ok_or_else(|| {
+                    format!(
+                        "task {task_id} is RETRYING but has no recorded failed verification"
+                    )
+                })?;
+            let retry_prompt =
+                retry_prompt_for_fail(&task.prompt, &verifier_kind, &verifier_output);
+            let launch_cwd = task_launch_cwd(conn, &task)?;
+            let graph_policy = graph_session_policy(&task, &launch_cwd)?;
+            if let Some(policy) = graph_policy.as_ref() {
+                super::session_policy::write_workspace(&launch_cwd, policy)
+                    .map_err(|e| format!("write graph workspace policy: {e}"))?;
+            }
+            let next_num = attempt_count(conn, task_id)? + 1;
+            let hook_cursor = super::hook_events::latest_id(conn)?;
+            let session_id = match latest_session_id(conn, task_id)? {
+                Some(existing) if fx.send_input(&existing, &retry_prompt).is_ok() => existing,
+                _ => fx.spawn_session(&launch_cwd, &retry_prompt)?,
+            };
+            if let Some(policy) = graph_policy.as_ref() {
+                let _ = super::session_policy::write(&session_id, policy);
+            }
+            let cwd_hash = Some(super::workspace::workspace_revision(&launch_cwd)?);
+            let _attempt_id = insert_attempt_with_hook_cursor(
+                conn,
+                task_id,
+                next_num,
+                Some(&session_id),
+                None,
+                cwd_hash.as_deref(),
+                hook_cursor,
+            )?;
+            transition(
+                conn,
+                task_id,
+                TaskState::Retrying,
+                TaskState::Running,
+                "retry-spawned",
+            )?;
             Ok(())
         }
         Action::Resume { task_id, cause } => {
@@ -260,6 +350,79 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
         // panicking. Implementation lands with the resume protocol.
         Action::WriteSessionPolicy { .. } | Action::ClearSessionPolicy { .. } => Ok(()),
     }
+}
+
+fn graph_session_policy(
+    task: &TaskRow,
+    workspace: &std::path::Path,
+) -> Result<Option<super::session_policy::SessionPolicy>, String> {
+    if task.graph_run_id.is_none() {
+        return Ok(None);
+    }
+    let policy = task
+        .policy
+        .as_ref()
+        .ok_or_else(|| format!("graph task '{}' is missing task policy", task.id))?;
+    let authority = policy
+        .get("authority")
+        .ok_or_else(|| format!("graph task '{}' policy is missing authority", task.id))?;
+
+    let string_array = |key: &str| -> Result<Vec<String>, String> {
+        authority
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("graph task '{}' authority.{key} is missing", task.id))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        format!("graph task '{}' authority.{key} contains a non-string", task.id)
+                    })
+            })
+            .collect()
+    };
+
+    let graph = super::session_policy::GraphSessionPolicy {
+        workspace_root: workspace.to_string_lossy().to_string(),
+        filesystem_read: string_array("filesystem_read")?,
+        filesystem_write: string_array("filesystem_write")?,
+        network: authority
+            .get("network")
+            .and_then(serde_json::Value::as_str)
+            == Some("allowed"),
+        git_commit: authority
+            .get("git_commit")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        git_push: authority
+            .get("git_push")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    };
+
+    Ok(Some(super::session_policy::SessionPolicy {
+        task_id: task.id.clone(),
+        approve_mode: super::session_policy::ApproveMode::Inherit,
+        written_at: crate::logger::timestamp_now(),
+        graph: Some(graph),
+    }))
+}
+
+fn task_launch_cwd(
+    conn: &Connection,
+    task: &TaskRow,
+) -> Result<std::path::PathBuf, String> {
+    if task.graph_run_id.is_none() {
+        return Ok(std::path::PathBuf::from(&task.cwd));
+    }
+    let workspace = super::workspace::prepare_task_workspace(task)?;
+    let workspace_str = workspace.to_string_lossy().to_string();
+    if task.workspace_path.as_deref() != Some(workspace_str.as_str()) {
+        set_workspace_path(conn, &task.id, &workspace_str)?;
+    }
+    Ok(workspace)
 }
 
 /// Compose the retry-prompt fed back to the agent on `Retrying`. The
@@ -341,6 +504,7 @@ mod tests {
     struct RecordingFx {
         published: std::cell::RefCell<Vec<(String, String, u32)>>,
         spawned: std::cell::RefCell<Vec<(std::path::PathBuf, String)>>,
+        sent: std::cell::RefCell<Vec<(String, String)>>,
         next_message_id: std::cell::RefCell<u64>,
         next_session_id: std::cell::RefCell<u64>,
         shell_results:
@@ -355,6 +519,7 @@ mod tests {
             Self {
                 published: Default::default(),
                 spawned: Default::default(),
+                sent: Default::default(),
                 next_message_id: std::cell::RefCell::new(1),
                 next_session_id: std::cell::RefCell::new(1),
                 shell_results: Default::default(),
@@ -429,6 +594,13 @@ mod tests {
                 .borrow_mut()
                 .push((cwd.to_path_buf(), prompt.to_string()));
             Ok(out)
+        }
+
+        fn send_input(&self, session_id: &str, text: &str) -> Result<(), String> {
+            self.sent
+                .borrow_mut()
+                .push((session_id.to_string(), text.to_string()));
+            Ok(())
         }
     }
 
@@ -624,6 +796,60 @@ mod tests {
         let hist = list_transitions(&conn, &id).unwrap();
         let last_cause = &hist.last().unwrap().2;
         assert_eq!(last_cause, "verify-fail");
+    }
+
+    #[test]
+    fn retry_action_uses_verifier_feedback_and_new_attempt() {
+        let mut conn = store::open_memory();
+        let new_task = NewTask {
+            verifiers: vec![crate::coord::verify::Verifier::Run {
+                command: "cargo test".into(),
+            }],
+            max_retries: Some(2),
+            ..sample_with_role(None)
+        };
+        let id = insert_task(&conn, &new_task).unwrap();
+        let attempt_id =
+            crate::coord::tasks::insert_attempt(&conn, &id, 1, Some("sess-old"), None, None)
+                .unwrap();
+        crate::coord::tasks::record_verification(
+            &conn,
+            &attempt_id,
+            "run",
+            "cargo test",
+            "FAIL",
+            "assertion failed",
+            0.0,
+        )
+        .unwrap();
+        crate::coord::tasks::transition(
+            &mut conn,
+            &id,
+            TaskState::Pending,
+            TaskState::Retrying,
+            "test-retry",
+        )
+        .unwrap();
+
+        let fx = RecordingFx::default();
+        apply(
+            &mut conn,
+            &fx,
+            &Action::Retry {
+                task_id: id.clone(),
+            },
+        )
+        .unwrap();
+
+        let task = get_task(&conn, &id).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Running);
+        assert_eq!(crate::coord::tasks::attempt_count(&conn, &id).unwrap(), 2);
+        let sent = fx.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "sess-old");
+        assert!(sent[0].1.contains("assertion failed"));
+        assert!(sent[0].1.contains("Previous attempt failed verification"));
+        assert!(fx.spawned.borrow().is_empty());
     }
 
     #[test]
