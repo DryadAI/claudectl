@@ -171,7 +171,14 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from(&task.cwd));
             for verifier in &task.verifiers {
-                let verdict = run_verifier(fx, &cwd, verifier)?;
+                let verdict = match run_verifier(fx, &cwd, verifier) {
+                    Ok(verdict) => verdict,
+                    Err(err) => crate::coord::verify::Verdict {
+                        verdict: VerdictKind::Fail,
+                        output: format!("verifier backend error: {err}"),
+                        cost_usd: 0.0,
+                    },
+                };
                 let verdict_str = match verdict.verdict {
                     VerdictKind::Pass => "PASS",
                     VerdictKind::Fail => "FAIL",
