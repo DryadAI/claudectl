@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "id": "durable-worktree-smoke-v1",
+  "goal": "Prove a writable durable Claude Code node launches inside an isolated Git worktree and verifies its local change without merge or push.",
+  "policy": {
+    "allow_network": false,
+    "allow_git_push": false,
+    "max_attempts_per_node": 1
+  },
+  "nodes": [
+    {
+      "id": "write_smoke_marker",
+      "kind": "agent",
+      "description": "Create one marker file in the isolated worktree only.",
+      "requires": [
+        "agent.execute"
+      ],
+      "authority": {
+        "filesystem_read": [
+          "**"
+        ],
+        "filesystem_write": [
+          ".claudectl-worktree-smoke.txt"
+        ],
+        "network": "denied",
+        "git_commit": false,
+        "git_push": false
+      },
+      "workspace": {
+        "mode": "worktree"
+      },
+      "risk": "reversible",
+      "retry": {
+        "max_attempts": 1
+      },
+      "inputs": [],
+      "outputs": [],
+      "executor": {
+        "kind": "provider",
+        "capability": "agent.execute",
+        "provider": "claude_code",
+        "request": {
+          "cwd": ".",
+          "prompt": "Create a file named .claudectl-worktree-smoke.txt in the current workspace containing exactly: graph worktree isolation ok\\nDo not modify any other file. Do not commit, push, or use the network.",
+          "verify": [
+            {
+              "kind": "run",
+              "command": "test \"$(cat .claudectl-worktree-smoke.txt)\" = \"graph worktree isolation ok\""
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": []
+}

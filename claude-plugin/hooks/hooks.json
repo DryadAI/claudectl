@@ -1,6 +1,21 @@
 {
   "PreToolUse": [
     {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "claudectl graph authorize-tool",
+          "timeout": 5
+        },
+        {
+          "type": "command",
+          "command": "claudectl ingest --hook PreToolUse 2>/dev/null || true",
+          "timeout": 5
+        }
+      ]
+    },
+    {
       "matcher": "Bash|Write|Edit|NotebookEdit",
       "hooks": [
         {
@@ -12,6 +27,16 @@
     }
   ],
   "PostToolUse": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "claudectl ingest --hook PostToolUse 2>/dev/null || true",
+          "timeout": 5
+        }
+      ]
+    },
     {
       "matcher": "Bash|Write|Edit|NotebookEdit",
       "hooks": [
@@ -28,6 +53,11 @@
       "hooks": [
         {
           "type": "command",
+          "command": "claudectl ingest --hook SessionStart 2>/dev/null || true",
+          "timeout": 5
+        },
+        {
+          "type": "command",
           "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session-briefing.sh",
           "timeout": 10
         }
@@ -37,6 +67,11 @@
   "Stop": [
     {
       "hooks": [
+        {
+          "type": "command",
+          "command": "claudectl ingest --hook Stop 2>/dev/null || true",
+          "timeout": 5
+        },
         {
           "type": "command",
           "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/inbox-drain.sh",

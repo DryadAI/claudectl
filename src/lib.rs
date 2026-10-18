@@ -35,6 +35,7 @@ pub mod bus;
 #[cfg(feature = "coord")]
 pub mod coord;
 pub mod doctor;
+pub mod graph;
 #[cfg(feature = "hive")]
 pub mod hive;
 pub mod init;
