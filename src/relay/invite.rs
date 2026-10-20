@@ -201,6 +201,10 @@ pub fn render_qr(text: &str) -> String {
         }
     }
 
+    render_qr_fallback(text)
+}
+
+fn render_qr_fallback(text: &str) -> String {
     // Fallback: render a simple bordered text box with the code
     let mut lines = Vec::new();
     lines.push(format!("  ╔{}╗", "═".repeat(text.len() + 2)));
@@ -434,8 +438,8 @@ mod tests {
 
     #[test]
     fn qr_fallback_renders_box() {
-        // qrencode likely not available in test env — tests the fallback
-        let output = render_qr("test-data");
-        assert!(output.contains("test-data") || output.contains("qrencode"));
+        // Exercise the fallback regardless of whether qrencode is installed.
+        let output = render_qr_fallback("test-data");
+        assert!(output.contains("test-data") && output.contains("qrencode"));
     }
 }

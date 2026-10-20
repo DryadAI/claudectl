@@ -1318,7 +1318,7 @@ fn run_tui<W: io::Write>(
         // Auto-quit after --duration seconds (graceful exit, flushes recordings)
         if let Some(max) = max_duration {
             if tui_start.elapsed() >= max {
-                for (_, rec) in sess_recs.iter_mut() {
+                for rec in sess_recs.values_mut() {
                     let _ = rec.finish();
                 }
                 if let Some(ref hl) = app.demo_highlight {
@@ -1386,7 +1386,7 @@ fn run_tui<W: io::Write>(
             if let Event::Key(key) = event::read()? {
                 if !app.handle_key(key) {
                     // Finish all session recordings on quit
-                    for (_, rec) in sess_recs.iter_mut() {
+                    for rec in sess_recs.values_mut() {
                         let _ = rec.finish();
                     }
                     if let Some(ref hl) = app.demo_highlight {
@@ -1428,7 +1428,7 @@ fn run_tui<W: io::Write>(
             }
 
             // Poll all active recorders
-            for (_, rec) in sess_recs.iter_mut() {
+            for rec in sess_recs.values_mut() {
                 let _ = rec.poll();
             }
 

@@ -5,6 +5,8 @@ use serde_json::Value;
 use super::schema::{NodeSpec, Outcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Public adapter vocabulary; the embedded binary currently uses only a subset.
+#[allow(dead_code)]
 pub enum ProviderConfidence {
     Observed,
     Derived,
@@ -23,6 +25,8 @@ pub struct ProviderResult {
 }
 
 impl ProviderResult {
+    // Convenience API for external providers and test adapters.
+    #[allow(dead_code)]
     pub fn pass_observed(message: impl Into<String>) -> Self {
         Self {
             outcome: Outcome::Pass,
@@ -90,7 +94,9 @@ impl<'a> ProviderRegistry<'a> {
     ) -> Option<&'a dyn Provider> {
         self.providers.iter().copied().find(|provider| {
             preferred.is_none_or(|name| provider.name() == name)
-                && required.iter().all(|capability| provider.supports(capability))
+                && required
+                    .iter()
+                    .all(|capability| provider.supports(capability))
         })
     }
 }
@@ -98,9 +104,7 @@ impl<'a> ProviderRegistry<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::schema::{
-        Authority, ExecutorSpec, NodeKind, RetryPolicy, RiskLevel,
-    };
+    use crate::graph::schema::{Authority, ExecutorSpec, NodeKind, RetryPolicy, RiskLevel};
 
     struct Stub;
 

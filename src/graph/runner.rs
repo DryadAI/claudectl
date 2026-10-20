@@ -134,13 +134,8 @@ fn run_with_registry(
             let max_attempts = node.retry.max_attempts;
 
             for attempt in 1..=max_attempts {
-                let record = execute_once(
-                    node,
-                    &compiled.fingerprint,
-                    attempt,
-                    providers,
-                    &run_dir,
-                )?;
+                let record =
+                    execute_once(node, &compiled.fingerprint, attempt, providers, &run_dir)?;
                 final_outcome = record.outcome;
                 append_evidence(&evidence_path, &record)?;
                 records.push(record);
@@ -306,8 +301,7 @@ fn execute_once(
             provider,
             request,
         }) => {
-            let Some(runtime_provider) =
-                providers.resolve(&node.requires, provider.as_deref())
+            let Some(runtime_provider) = providers.resolve(&node.requires, provider.as_deref())
             else {
                 return Ok(unknown_evidence(
                     node,
@@ -423,7 +417,10 @@ fn prompt_for_approval(node: &NodeSpec, fingerprint: &str) -> io::Result<bool> {
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    Ok(matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    Ok(matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn append_evidence(path: &Path, evidence: &EvidenceRecord) -> io::Result<()> {
@@ -435,11 +432,7 @@ fn append_evidence(path: &Path, evidence: &EvidenceRecord) -> io::Result<()> {
 
 fn create_run_dir(base: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(base)?;
-    let dir = base.join(format!(
-        "graph-{}-{}",
-        now_epoch_ms(),
-        std::process::id()
-    ));
+    let dir = base.join(format!("graph-{}-{}", now_epoch_ms(), std::process::id()));
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }

@@ -22,9 +22,9 @@ use rusqlite::Connection;
 
 use super::supervisor::Action;
 use super::tasks::{
-    TaskRow, TaskState, attempt_count, get_task, insert_attempt,
-    insert_attempt_with_hook_cursor, latest_failed_verification, latest_session_id,
-    record_verification, set_workspace_path, transition,
+    TaskRow, TaskState, attempt_count, get_task, insert_attempt, insert_attempt_with_hook_cursor,
+    latest_failed_verification, latest_session_id, record_verification, set_workspace_path,
+    transition,
 };
 use super::verify::{VerdictKind, VerifierBackend, run_verifier};
 
@@ -259,9 +259,7 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             }
             let (verifier_kind, verifier_output) = latest_failed_verification(conn, task_id)?
                 .ok_or_else(|| {
-                    format!(
-                        "task {task_id} is RETRYING but has no recorded failed verification"
-                    )
+                    format!("task {task_id} is RETRYING but has no recorded failed verification")
                 })?;
             let retry_prompt =
                 retry_prompt_for_fail(&task.prompt, &verifier_kind, &verifier_output);
@@ -280,7 +278,13 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
             if let Some(policy) = graph_policy.as_ref() {
                 let _ = super::session_policy::write(&session_id, policy);
             }
-            let cwd_hash = Some(super::workspace::workspace_revision(&launch_cwd)?);
+            // Match Spawn: revision evidence is a graph-workspace contract.
+            // Ordinary supervisor retries may run outside a Git repository.
+            let cwd_hash = if task.graph_run_id.is_some() {
+                Some(super::workspace::workspace_revision(&launch_cwd)?)
+            } else {
+                None
+            };
             let _attempt_id = insert_attempt_with_hook_cursor(
                 conn,
                 task_id,
@@ -374,12 +378,12 @@ fn graph_session_policy(
             .ok_or_else(|| format!("graph task '{}' authority.{key} is missing", task.id))?
             .iter()
             .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        format!("graph task '{}' authority.{key} contains a non-string", task.id)
-                    })
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    format!(
+                        "graph task '{}' authority.{key} contains a non-string",
+                        task.id
+                    )
+                })
             })
             .collect()
     };
@@ -388,10 +392,7 @@ fn graph_session_policy(
         workspace_root: workspace.to_string_lossy().to_string(),
         filesystem_read: string_array("filesystem_read")?,
         filesystem_write: string_array("filesystem_write")?,
-        network: authority
-            .get("network")
-            .and_then(serde_json::Value::as_str)
-            == Some("allowed"),
+        network: authority.get("network").and_then(serde_json::Value::as_str) == Some("allowed"),
         git_commit: authority
             .get("git_commit")
             .and_then(serde_json::Value::as_bool)
@@ -410,10 +411,7 @@ fn graph_session_policy(
     }))
 }
 
-fn task_launch_cwd(
-    conn: &Connection,
-    task: &TaskRow,
-) -> Result<std::path::PathBuf, String> {
+fn task_launch_cwd(conn: &Connection, task: &TaskRow) -> Result<std::path::PathBuf, String> {
     if task.graph_run_id.is_none() {
         return Ok(std::path::PathBuf::from(&task.cwd));
     }
