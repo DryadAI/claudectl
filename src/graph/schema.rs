@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphSpec {
     pub version: u32,
@@ -14,7 +14,7 @@ pub struct GraphSpec {
     pub edges: Vec<EdgeSpec>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphPolicy {
     #[serde(default)]
@@ -39,7 +39,7 @@ const fn default_max_attempts_per_node() -> u32 {
     4
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSpec {
     pub id: String,
@@ -64,7 +64,7 @@ pub struct NodeSpec {
     pub executor: Option<ExecutorSpec>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Command,
@@ -75,7 +75,7 @@ pub enum NodeKind {
     Subgraph,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutorSpec {
     Shell {
@@ -92,7 +92,7 @@ pub enum ExecutorSpec {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSpec {
     #[serde(default)]
@@ -107,7 +107,9 @@ impl Default for WorkspaceSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, Default, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceMode {
     #[default]
@@ -115,7 +117,7 @@ pub enum WorkspaceMode {
     Worktree,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Authority {
     #[serde(default)]
@@ -130,7 +132,9 @@ pub struct Authority {
     pub git_push: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, Default, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkAuthority {
     #[default]
@@ -138,7 +142,9 @@ pub enum NetworkAuthority {
     Allowed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, Default, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,
@@ -148,7 +154,7 @@ pub enum RiskLevel {
     Irreversible,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryPolicy {
     #[serde(default = "default_max_attempts")]
@@ -167,7 +173,7 @@ const fn default_max_attempts() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PortSpec {
     pub name: String,
@@ -175,7 +181,7 @@ pub struct PortSpec {
     pub data_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EdgeSpec {
     pub from: EdgeEndpoint,
@@ -184,7 +190,7 @@ pub struct EdgeSpec {
     pub dependency_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EdgeEndpoint {
     pub node: String,
@@ -192,7 +198,7 @@ pub struct EdgeEndpoint {
     pub port: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Outcome {
     Pass,
