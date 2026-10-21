@@ -76,11 +76,9 @@ pub fn since(conn: &Connection, since_id: i64, limit: usize) -> Result<Vec<HookE
 }
 
 pub fn latest_id(conn: &Connection) -> Result<i64, String> {
-    conn.query_row(
-        "SELECT COALESCE(MAX(id), 0) FROM hook_events",
-        [],
-        |row| row.get(0),
-    )
+    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM hook_events", [], |row| {
+        row.get(0)
+    })
     .map_err(|e| format!("latest hook event id: {e}"))
 }
 
@@ -186,22 +184,10 @@ mod tests {
         };
         append(&conn, &event).unwrap();
         assert!(
-            has_hook_for_session_since(
-                &conn,
-                "Stop",
-                "sess_x",
-                "2026-10-12T02:59:59Z"
-            )
-            .unwrap()
+            has_hook_for_session_since(&conn, "Stop", "sess_x", "2026-10-12T02:59:59Z").unwrap()
         );
         assert!(
-            !has_hook_for_session_since(
-                &conn,
-                "Stop",
-                "sess_x",
-                "2026-10-12T03:00:01Z"
-            )
-            .unwrap()
+            !has_hook_for_session_since(&conn, "Stop", "sess_x", "2026-10-12T03:00:01Z").unwrap()
         );
     }
 

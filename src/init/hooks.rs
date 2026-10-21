@@ -331,7 +331,11 @@ pub fn run_init(project: bool, dry_run: bool) -> io::Result<()> {
 fn print_success(path: &Path, refreshed: bool) {
     println!(
         "{} claudectl hooks in {}",
-        if refreshed { "Refreshed" } else { "Initialized" },
+        if refreshed {
+            "Refreshed"
+        } else {
+            "Initialized"
+        },
         path.display()
     );
     println!();

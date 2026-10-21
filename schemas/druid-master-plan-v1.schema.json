@@ -1,0 +1,498 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MasterPlan",
+  "type": "object",
+  "properties": {
+    "graph": {
+      "description": "The one canonical execution IR, including all authority and policy.",
+      "$ref": "#/$defs/GraphSpec"
+    },
+    "previous_digest": {
+      "description": "SHA-256 of the preceding compiled plan, required after revision 1.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Requirement"
+      }
+    },
+    "revision": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "source": {
+      "$ref": "#/$defs/SourceRevision"
+    },
+    "version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "work": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WorkItem"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "revision",
+    "source",
+    "requirements",
+    "work",
+    "graph"
+  ],
+  "$defs": {
+    "Authority": {
+      "type": "object",
+      "properties": {
+        "filesystem_read": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_write": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "git_commit": {
+          "type": "boolean",
+          "default": false
+        },
+        "git_push": {
+          "type": "boolean",
+          "default": false
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkAuthority",
+          "default": "denied"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EdgeEndpoint": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "node"
+      ]
+    },
+    "EdgeSpec": {
+      "type": "object",
+      "properties": {
+        "dependency_only": {
+          "type": "boolean",
+          "default": false
+        },
+        "from": {
+          "$ref": "#/$defs/EdgeEndpoint"
+        },
+        "to": {
+          "$ref": "#/$defs/EdgeEndpoint"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "ExecutorSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "shell"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "command"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "provider"
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "request": {
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "capability"
+          ]
+        }
+      ]
+    },
+    "GraphPolicy": {
+      "type": "object",
+      "properties": {
+        "allow_git_push": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_network": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_attempts_per_node": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 4,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "GraphSpec": {
+      "type": "object",
+      "properties": {
+        "edges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EdgeSpec"
+          }
+        },
+        "goal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NodeSpec"
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/GraphPolicy",
+          "default": {
+            "allow_git_push": false,
+            "allow_network": false,
+            "max_attempts_per_node": 4
+          }
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "id",
+        "nodes"
+      ]
+    },
+    "NetworkAuthority": {
+      "type": "string",
+      "enum": [
+        "denied",
+        "allowed"
+      ]
+    },
+    "NodeKind": {
+      "type": "string",
+      "enum": [
+        "command",
+        "check",
+        "agent",
+        "tool",
+        "approval",
+        "subgraph"
+      ]
+    },
+    "NodeSpec": {
+      "type": "object",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/Authority",
+          "default": {
+            "filesystem_read": [],
+            "filesystem_write": [],
+            "git_commit": false,
+            "git_push": false,
+            "network": "denied"
+          }
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "executor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutorSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "inputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortSpec"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/NodeKind"
+        },
+        "outputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortSpec"
+          }
+        },
+        "requires": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "max_attempts": 1
+          }
+        },
+        "risk": {
+          "$ref": "#/$defs/RiskLevel",
+          "default": "reversible"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceSpec",
+          "default": {
+            "mode": "shared"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind"
+      ]
+    },
+    "Phase": {
+      "type": "string",
+      "enum": [
+        "discovery",
+        "inventory",
+        "architecture",
+        "dependencies",
+        "specification",
+        "implementation",
+        "verification",
+        "approval",
+        "deployment",
+        "recovery"
+      ]
+    },
+    "PortSpec": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "Requirement": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "source"
+      ]
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RiskLevel": {
+      "type": "string",
+      "enum": [
+        "low",
+        "reversible",
+        "recoverable",
+        "irreversible"
+      ]
+    },
+    "SourceRevision": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "description": "Full immutable Git object ID. This is a provenance claim, not a fetch.",
+          "type": "string"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "repository": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "references"
+      ]
+    },
+    "WorkItem": {
+      "type": "object",
+      "properties": {
+        "deliverables": {
+          "description": "Intended artifacts; listing one here is never evidence of its existence.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "node": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verify_with": {
+          "description": "Independent downstream check nodes whose observed PASS verifies this item.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "phase",
+        "requirements",
+        "deliverables",
+        "verify_with"
+      ]
+    },
+    "WorkspaceMode": {
+      "type": "string",
+      "enum": [
+        "shared",
+        "worktree"
+      ]
+    },
+    "WorkspaceSpec": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/WorkspaceMode",
+          "default": "shared"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

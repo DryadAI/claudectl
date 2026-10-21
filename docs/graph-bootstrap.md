@@ -7,6 +7,11 @@ The graph layer now has two execution paths over one canonical, framework-indepe
 
 This is still a draft bootstrap. Mixed durable graphs, automatic integration/merge, graph timeouts, and cryptographic plan binding are not implemented yet.
 
+The [DRUID master planner](druid-master-plans.md) now compiles versioned lifecycle
+plans into this same IR, with requirements, SHA-256 content identity and evidence
+projections. Its digest is not a signed authorization or a change to runtime
+approval enforcement.
+
 ## Operator flow
 
 Refresh the current hook/plugin assets and DB migrations after installing this branch:
@@ -196,12 +201,12 @@ Current durable evidence includes:
 
 The most important remaining gaps are:
 
-1. **No Rust build verification in this environment yet.** This branch must pass formatting, check, clippy, and tests before merge.
+1. **Durable environment integration remains unverified.** [PR #2 local validation](validation/druid-master-compiler-v1.md) covers formatting, check, clippy, tests and the local master-plan example; it does not exercise production agent launches or installed hooks.
 2. No automatic fan-in/integration/merge of independent worktrees.
 3. No mixed durable graph where deterministic/REA nodes and supervisor-backed agent nodes share one resumable execution state machine.
 4. No enforced wall-clock cancellation/termination contract.
 5. No automatic worktree cleanup.
-6. No cryptographic plan digest binding graph + repository state + authority + intended side effects.
+6. No signed authorization binding execution to verified repository state. Master plans now have SHA-256 content identity over the authored graph, source claims and authority; the runtime does not attest those claims or enforce a signed approval digest.
 7. No Graph Builder interview/UI over this runtime yet.
 
 ## Required validation before merge

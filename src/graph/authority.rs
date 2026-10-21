@@ -38,9 +38,7 @@ pub fn authorize_stdin() -> io::Result<()> {
         Ok(Some(policy)) => Some(policy),
         Ok(None) => match std::env::current_dir()
             .map_err(io::Error::other)
-            .and_then(|cwd| {
-                session_policy::read_workspace_strict(&cwd).map_err(io::Error::other)
-            })
+            .and_then(|cwd| session_policy::read_workspace_strict(&cwd).map_err(io::Error::other))
         {
             Ok(policy) => policy,
             Err(err) => {
@@ -269,7 +267,11 @@ mod tests {
             Decision::Deny(_)
         ));
         assert!(matches!(
-            authorize(&p, "WebFetch", &serde_json::json!({"url":"https://example.com"})),
+            authorize(
+                &p,
+                "WebFetch",
+                &serde_json::json!({"url":"https://example.com"})
+            ),
             Decision::Deny(_)
         ));
     }
@@ -281,11 +283,7 @@ mod tests {
         let p = policy(dir.path());
 
         assert_eq!(
-            authorize(
-                &p,
-                "Write",
-                &serde_json::json!({"file_path":"src/new.rs"})
-            ),
+            authorize(&p, "Write", &serde_json::json!({"file_path":"src/new.rs"})),
             Decision::Allow
         );
         assert!(matches!(
@@ -297,11 +295,7 @@ mod tests {
             Decision::Deny(_)
         ));
         assert!(matches!(
-            authorize(
-                &p,
-                "Write",
-                &serde_json::json!({"file_path":"README.md"})
-            ),
+            authorize(&p, "Write", &serde_json::json!({"file_path":"README.md"})),
             Decision::Deny(_)
         ));
     }

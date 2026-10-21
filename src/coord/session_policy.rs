@@ -128,7 +128,10 @@ pub fn write_workspace(workspace_root: &Path, policy: &SessionPolicy) -> io::Res
     let canonical = workspace_root.canonicalize()?;
     let target_dir = workspace_dir();
     fs::create_dir_all(&target_dir)?;
-    let path = target_dir.join(format!("{:016x}.json", fnv1a64(canonical.to_string_lossy().as_bytes())));
+    let path = target_dir.join(format!(
+        "{:016x}.json",
+        fnv1a64(canonical.to_string_lossy().as_bytes())
+    ));
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_vec_pretty(policy).map_err(io::Error::other)?;
     {
