@@ -104,7 +104,10 @@ fn status_with_connection(
 
     let effective_state = if tasks.is_empty() {
         "EMPTY"
-    } else if tasks.iter().all(|task| task.state == tasks::TaskState::Done) {
+    } else if tasks
+        .iter()
+        .all(|task| task.state == tasks::TaskState::Done)
+    {
         "DONE"
     } else if tasks
         .iter()
@@ -161,8 +164,7 @@ fn task_outcome(
         tasks::TaskState::Done => Outcome::Pass,
         tasks::TaskState::Cancelled => Outcome::Error,
         tasks::TaskState::NeedsHuman => {
-            if latest_verification
-                .is_some_and(|(_, verdict)| verdict.eq_ignore_ascii_case("FAIL"))
+            if latest_verification.is_some_and(|(_, verdict)| verdict.eq_ignore_ascii_case("FAIL"))
             {
                 Outcome::Fail
             } else {
@@ -194,12 +196,7 @@ fn submit_with_connection(
     tx.execute(
         "INSERT INTO graph_runs (id, graph_id, fingerprint, state, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'PENDING', ?4, ?4)",
-        params![
-            graph_run_id,
-            compiled.spec.id,
-            compiled.fingerprint,
-            now,
-        ],
+        params![graph_run_id, compiled.spec.id, compiled.fingerprint, now,],
     )
     .map_err(|e| format!("insert graph run: {e}"))?;
 
@@ -260,13 +257,7 @@ fn submit_with_connection(
         let task_id = task_ids
             .get(&node.id)
             .ok_or_else(|| format!("missing preallocated task id for node '{}'", node.id))?;
-        tasks::insert_task_with_identity(
-            &tx,
-            task_id,
-            Some(&graph_run_id),
-            Some(&node.id),
-            &task,
-        )?;
+        tasks::insert_task_with_identity(&tx, task_id, Some(&graph_run_id), Some(&node.id), &task)?;
     }
 
     tx.commit()
@@ -388,7 +379,10 @@ fn agent_request(node: &NodeSpec) -> Result<AgentTaskRequest, String> {
     let request: AgentTaskRequest = serde_json::from_value(request.clone())
         .map_err(|e| format!("agent node '{}' request: {e}", node.id))?;
     if request.cwd.trim().is_empty() {
-        return Err(format!("agent node '{}' request.cwd must not be empty", node.id));
+        return Err(format!(
+            "agent node '{}' request.cwd must not be empty",
+            node.id
+        ));
     }
     if request.prompt.trim().is_empty() {
         return Err(format!(
@@ -465,7 +459,10 @@ mod tests {
         let a_task = tasks::get_task(&conn, a_id).unwrap().unwrap();
         let b_task = tasks::get_task(&conn, b_id).unwrap().unwrap();
 
-        assert_eq!(a_task.graph_run_id.as_deref(), Some(submission.graph_run_id.as_str()));
+        assert_eq!(
+            a_task.graph_run_id.as_deref(),
+            Some(submission.graph_run_id.as_str())
+        );
         assert_eq!(a_task.graph_node_id.as_deref(), Some("a"));
         assert!(a_task.depends_on.is_empty());
         assert_eq!(b_task.depends_on, vec![a_id.clone()]);
@@ -546,9 +543,11 @@ mod tests {
         })
         .unwrap();
         let mut conn = store::open_memory();
-        assert!(submit_with_connection(&mut conn, &compiled)
-            .unwrap_err()
-            .contains("direct-spawn"));
+        assert!(
+            submit_with_connection(&mut conn, &compiled)
+                .unwrap_err()
+                .contains("direct-spawn")
+        );
 
         let mut node = agent("model");
         if let Some(ExecutorSpec::Provider { request, .. }) = node.executor.as_mut() {
@@ -568,9 +567,11 @@ mod tests {
         })
         .unwrap();
         let mut conn = store::open_memory();
-        assert!(submit_with_connection(&mut conn, &compiled)
-            .unwrap_err()
-            .contains("model selection"));
+        assert!(
+            submit_with_connection(&mut conn, &compiled)
+                .unwrap_err()
+                .contains("model selection")
+        );
     }
 
     #[test]
@@ -587,9 +588,11 @@ mod tests {
         })
         .unwrap();
         let mut conn = store::open_memory();
-        assert!(submit_with_connection(&mut conn, &compiled)
-            .unwrap_err()
-            .contains("git_commit=false"));
+        assert!(
+            submit_with_connection(&mut conn, &compiled)
+                .unwrap_err()
+                .contains("git_commit=false")
+        );
     }
 
     #[test]
@@ -623,7 +626,7 @@ mod tests {
         .unwrap();
         let mut conn = store::open_memory();
         let err = submit_with_connection(&mut conn, &compiled).unwrap_err();
-        assert!(err.contains("absolute write authority"));
+        assert!(err.contains("absolute filesystem authority"));
     }
 
     #[test]

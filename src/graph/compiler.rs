@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::schema::{
     EdgeSpec, ExecutorSpec, GraphSpec, NetworkAuthority, NodeKind, NodeSpec, PortSpec, RiskLevel,
 };
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CompiledGraph {
     pub spec: GraphSpec,
     pub dependencies: BTreeMap<String, Vec<String>>,
@@ -127,12 +128,18 @@ fn validate_node(node: &NodeSpec, spec: &GraphSpec) -> Result<(), String> {
         }
         _ => {
             let executor = node.executor.as_ref().ok_or_else(|| {
-                format!("node '{}' of kind {:?} requires an executor", node.id, node.kind)
+                format!(
+                    "node '{}' of kind {:?} requires an executor",
+                    node.id, node.kind
+                )
             })?;
             match executor {
                 ExecutorSpec::Shell { command, .. } => {
                     if command.trim().is_empty() {
-                        return Err(format!("node '{}' shell command must not be empty", node.id));
+                        return Err(format!(
+                            "node '{}' shell command must not be empty",
+                            node.id
+                        ));
                     }
                     require_capability(node, "shell.execute")?;
                 }
@@ -232,9 +239,7 @@ fn validate_edge(edge: &EdgeSpec, nodes: &HashMap<String, &NodeSpec>) -> Result<
         .iter()
         .find(|p| p.name == to_port)
         .map(|p| p.data_type.as_str())
-        .ok_or_else(|| {
-            format!("node '{}' has no input port '{}'", edge.to.node, to_port)
-        })?;
+        .ok_or_else(|| format!("node '{}' has no input port '{}'", edge.to.node, to_port))?;
 
     if from_type != to_type {
         return Err(format!(
@@ -298,16 +303,12 @@ fn has_approval_ancestor(
         return false;
     }
 
-    dependencies
-        .get(node_id)
-        .into_iter()
-        .flatten()
-        .any(|dep| {
-            nodes
-                .get(dep)
-                .is_some_and(|node| node.kind == NodeKind::Approval)
-                || has_approval_ancestor(dep, dependencies, nodes, visited)
-        })
+    dependencies.get(node_id).into_iter().flatten().any(|dep| {
+        nodes
+            .get(dep)
+            .is_some_and(|node| node.kind == NodeKind::Approval)
+            || has_approval_ancestor(dep, dependencies, nodes, visited)
+    })
 }
 
 fn build_waves(dependencies: &BTreeMap<String, Vec<String>>) -> Result<Vec<Vec<String>>, String> {
@@ -437,7 +438,10 @@ mod tests {
             dependency_only: true,
         };
         let compiled = compile(graph(vec![a, b], vec![edge])).unwrap();
-        assert_eq!(compiled.waves, vec![vec!["a".to_string()], vec!["b".to_string()]]);
+        assert_eq!(
+            compiled.waves,
+            vec![vec!["a".to_string()], vec!["b".to_string()]]
+        );
         assert!(compiled.fingerprint.starts_with("fnv1a64:"));
     }
 

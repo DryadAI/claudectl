@@ -5,9 +5,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use super::provider::{
-    Provider, ProviderConfidence, ProviderContext, ProviderResult,
-};
+use super::provider::{Provider, ProviderConfidence, ProviderContext, ProviderResult};
 use super::schema::{NodeSpec, Outcome};
 
 pub const CAP_JAVASCRIPT_ANALYZE: &str = "reverse.javascript.analyze";
@@ -127,19 +125,15 @@ impl Provider for ReaCliProvider {
 }
 
 fn authorize_read_target(node: &NodeSpec, target: &str) -> Result<(), String> {
-    let target = std::fs::canonicalize(target)
-        .map_err(|e| format!("resolve REA target '{target}': {e}"))?;
+    let target =
+        std::fs::canonicalize(target).map_err(|e| format!("resolve REA target '{target}': {e}"))?;
 
     for rule in &node.authority.filesystem_read {
         if let Some(prefix) = rule.strip_suffix("/**") {
-            if canonical_prefix(prefix)
-                .is_some_and(|allowed| target.starts_with(allowed))
-            {
+            if canonical_prefix(prefix).is_some_and(|allowed| target.starts_with(allowed)) {
                 return Ok(());
             }
-        } else if std::fs::canonicalize(rule)
-            .is_ok_and(|allowed| allowed == target)
-        {
+        } else if std::fs::canonicalize(rule).is_ok_and(|allowed| allowed == target) {
             return Ok(());
         }
     }
@@ -174,11 +168,7 @@ fn sanitize(value: &str) -> String {
             out.push('-');
         }
     }
-    if out.is_empty() {
-        "rea".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "rea".into() } else { out }
 }
 
 #[cfg(test)]

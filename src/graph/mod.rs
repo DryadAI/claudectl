@@ -3,6 +3,7 @@ pub mod authority;
 pub mod compiler;
 #[cfg(feature = "coord")]
 pub mod durable;
+pub mod master;
 pub mod provider;
 pub mod rea;
 pub mod runner;
@@ -14,6 +15,11 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
 pub enum GraphCommand {
+    /// Compile and inspect versioned, traceable DRUID master plans.
+    Master {
+        #[command(subcommand)]
+        command: master::MasterCommand,
+    },
     /// Validate graph syntax, typed edges, policy, risk gates, and acyclicity.
     Validate {
         /// Path to a graph JSON file.
@@ -52,6 +58,7 @@ pub enum GraphCommand {
 
 pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
     match command {
+        GraphCommand::Master { command } => master::dispatch(command),
         GraphCommand::Validate { path } => {
             let compiled = load_and_compile(path)?;
             if json {
@@ -131,7 +138,7 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
         GraphCommand::AuthorizeTool => {
             #[cfg(feature = "coord")]
             {
-                return authority::authorize_stdin();
+                authority::authorize_stdin()
             }
             #[cfg(not(feature = "coord"))]
             {

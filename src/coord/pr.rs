@@ -215,6 +215,9 @@ mod tests {
             depends_on: vec![],
             policy: None,
             verifiers: vec![],
+            graph_run_id: None,
+            graph_node_id: None,
+            workspace_path: None,
             created_at: "2026-06-28T10:00:00Z".into(),
             updated_at: "2026-06-28T10:05:00Z".into(),
         }

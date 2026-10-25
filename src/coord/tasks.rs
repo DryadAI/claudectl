@@ -432,10 +432,7 @@ pub fn latest_session_id(conn: &Connection, task_id: &str) -> Result<Option<Stri
 /// when transitioning Running → Verifying so the verifier rows attach
 /// to the right attempt. Mirrors `latest_attempt_age_minutes` but
 /// returns the id instead of the elapsed time.
-pub fn latest_attempt_hook_cursor(
-    conn: &Connection,
-    task_id: &str,
-) -> Result<Option<i64>, String> {
+pub fn latest_attempt_hook_cursor(conn: &Connection, task_id: &str) -> Result<Option<i64>, String> {
     conn.query_row(
         "SELECT hook_cursor FROM task_attempts WHERE task_id = ?1
          ORDER BY attempt_num DESC LIMIT 1",

@@ -62,7 +62,10 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
     }
 
     let target = workspace_root()
-        .join(format!("{:016x}", fnv1a64(repo_root.to_string_lossy().as_bytes())))
+        .join(format!(
+            "{:016x}",
+            fnv1a64(repo_root.to_string_lossy().as_bytes())
+        ))
         .join(sanitize_component(graph_run_id))
         .join(sanitize_component(graph_node_id));
 
@@ -82,8 +85,10 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    let dirty =
-        git_stdout(&repo_root, &["status", "--porcelain", "--untracked-files=normal"])?;
+    let dirty = git_stdout(
+        &repo_root,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )?;
     if !dirty.trim().is_empty() {
         return Err(format!(
             "source repository '{}' has uncommitted changes; durable worktree execution requires a clean source checkout",
@@ -107,14 +112,7 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
     let create = Command::new("git")
         .arg("-C")
         .arg(&repo_root)
-        .args([
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            &target_str,
-            &base_commit,
-        ])
+        .args(["worktree", "add", "-b", &branch, &target_str, &base_commit])
         .output()
         .map_err(|e| format!("start git worktree add: {e}"))?;
 
@@ -142,9 +140,7 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn workspace_revision(path: &Path) -> Result<String, String> {
-    Ok(git_stdout(path, &["rev-parse", "HEAD"])?
-        .trim()
-        .to_string())
+    Ok(git_stdout(path, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
 fn workspace_mode(policy: Option<&Value>) -> WorkspaceMode {
@@ -189,8 +185,7 @@ fn is_git_worktree(path: &Path) -> bool {
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .is_ok_and(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).trim() == "true"
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
         })
 }
 

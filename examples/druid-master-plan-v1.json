@@ -1,0 +1,549 @@
+{
+  "version": 1,
+  "revision": 1,
+  "previous_digest": null,
+  "source": {
+    "repository": "https://github.com/DryadAI/claudectl",
+    "commit": "4f6dbbd271788ee021584ece002aa072c1b1c75c",
+    "references": [
+      "https://github.com/DryadAI/claudectl/pull/1",
+      "docs/graph-bootstrap.md"
+    ]
+  },
+  "requirements": [
+    {
+      "id": "DRUID-001",
+      "description": "Discover the current repository revision; compare it with source.commit before executing a real plan.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-002",
+      "description": "Inventory graph runtime, documentation and example files.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-003",
+      "description": "Inspect the canonical IR, provider boundary and durable supervisor architecture.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-004",
+      "description": "Resolve workspace dependency metadata without network access.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-005",
+      "description": "Check that versioned planning schemas are available.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-006",
+      "description": "Inspect the compiler implementation and regression suite; presence alone is not verification.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-007",
+      "description": "Run the compiler acceptance suite; attach the resulting runtime evidence.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-008",
+      "description": "Human review of implementation and verification evidence before any release or recovery action.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-009",
+      "description": "Reserved deployment capability: no provider is shipped; remains UNKNOWN and performs no deployment.",
+      "source": "docs/druid-master-plans.md#contract"
+    },
+    {
+      "id": "DRUID-010",
+      "description": "Reserved recovery capability: no provider is shipped; requires human approval and successful deployment dependency.",
+      "source": "docs/druid-master-plans.md#contract"
+    }
+  ],
+  "work": [
+    {
+      "node": "discovery",
+      "phase": "discovery",
+      "requirements": [
+        "DRUID-001"
+      ],
+      "deliverables": [
+        "discovery-evidence"
+      ],
+      "verify_with": [
+        "verification"
+      ]
+    },
+    {
+      "node": "inventory",
+      "phase": "inventory",
+      "requirements": [
+        "DRUID-002"
+      ],
+      "deliverables": [
+        "inventory-evidence"
+      ],
+      "verify_with": [
+        "verification"
+      ]
+    },
+    {
+      "node": "architecture",
+      "phase": "architecture",
+      "requirements": [
+        "DRUID-003"
+      ],
+      "deliverables": [
+        "architecture-evidence"
+      ],
+      "verify_with": [
+        "verification"
+      ]
+    },
+    {
+      "node": "dependencies",
+      "phase": "dependencies",
+      "requirements": [
+        "DRUID-004"
+      ],
+      "deliverables": [
+        "dependencies-evidence"
+      ],
+      "verify_with": [
+        "verification"
+      ]
+    },
+    {
+      "node": "specification",
+      "phase": "specification",
+      "requirements": [
+        "DRUID-005"
+      ],
+      "deliverables": [
+        "specification-evidence"
+      ],
+      "verify_with": [
+        "verification"
+      ]
+    },
+    {
+      "node": "implementation",
+      "phase": "implementation",
+      "requirements": [
+        "DRUID-006"
+      ],
+      "deliverables": [
+        "implementation-evidence"
+      ],
+      "verify_with": [
+        "verification"
+      ]
+    },
+    {
+      "node": "verification",
+      "phase": "verification",
+      "requirements": [
+        "DRUID-007"
+      ],
+      "deliverables": [
+        "verification-evidence"
+      ],
+      "verify_with": []
+    },
+    {
+      "node": "approval",
+      "phase": "approval",
+      "requirements": [
+        "DRUID-008"
+      ],
+      "deliverables": [
+        "approval-evidence"
+      ],
+      "verify_with": []
+    },
+    {
+      "node": "deployment",
+      "phase": "deployment",
+      "requirements": [
+        "DRUID-009"
+      ],
+      "deliverables": [
+        "deployment-evidence"
+      ],
+      "verify_with": []
+    },
+    {
+      "node": "recovery",
+      "phase": "recovery",
+      "requirements": [
+        "DRUID-010"
+      ],
+      "deliverables": [
+        "recovery-evidence"
+      ],
+      "verify_with": []
+    }
+  ],
+  "graph": {
+    "version": 1,
+    "id": "druid-master",
+    "goal": "Compile and validate the DRUID master planning system, with explicit operator gates for future deployment and recovery.",
+    "policy": {
+      "allow_network": false,
+      "allow_git_push": false,
+      "max_attempts_per_node": 1
+    },
+    "nodes": [
+      {
+        "id": "discovery",
+        "kind": "check",
+        "description": "Discover the current repository revision; compare it with source.commit before executing a real plan.",
+        "requires": [
+          "shell.execute"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "shell",
+          "command": "git rev-parse HEAD"
+        }
+      },
+      {
+        "id": "inventory",
+        "kind": "check",
+        "description": "Inventory graph runtime, documentation and example files.",
+        "requires": [
+          "shell.execute"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "shell",
+          "command": "git ls-files src/graph docs examples"
+        }
+      },
+      {
+        "id": "architecture",
+        "kind": "check",
+        "description": "Inspect the canonical IR, provider boundary and durable supervisor architecture.",
+        "requires": [
+          "shell.execute"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "shell",
+          "command": "test -f docs/graph-bootstrap.md && test -f docs/druid-master-plans.md"
+        }
+      },
+      {
+        "id": "dependencies",
+        "kind": "check",
+        "description": "Resolve workspace dependency metadata without network access.",
+        "requires": [
+          "shell.execute"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "shell",
+          "command": "cargo metadata --offline --no-deps --format-version 1"
+        }
+      },
+      {
+        "id": "specification",
+        "kind": "check",
+        "description": "Check that versioned planning schemas are available.",
+        "requires": [
+          "shell.execute"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "shell",
+          "command": "test -f schemas/druid-master-plan-v1.schema.json && test -f schemas/druid-compiled-plan-v1.schema.json"
+        }
+      },
+      {
+        "id": "implementation",
+        "kind": "check",
+        "description": "Inspect the compiler implementation and regression suite; presence alone is not verification.",
+        "requires": [
+          "shell.execute"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "shell",
+          "command": "test -f src/graph/master.rs && test -f tests/master_plan.rs"
+        }
+      },
+      {
+        "id": "verification",
+        "kind": "check",
+        "description": "Run the compiler acceptance suite; attach the resulting runtime evidence.",
+        "requires": [
+          "shell.execute"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "shell",
+          "command": "cargo test --test master_plan"
+        }
+      },
+      {
+        "id": "approval",
+        "kind": "approval",
+        "description": "Human review of implementation and verification evidence before any release or recovery action.",
+        "requires": [
+          "human.approval"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "low",
+        "retry": {
+          "max_attempts": 1
+        }
+      },
+      {
+        "id": "deployment",
+        "kind": "tool",
+        "description": "Reserved deployment capability: no provider is shipped; remains UNKNOWN and performs no deployment.",
+        "requires": [
+          "druid.deployment"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "recoverable",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "provider",
+          "capability": "druid.deployment",
+          "provider": "druid_operator",
+          "request": {
+            "mode": "unconfigured",
+            "runbook": "docs/runbooks/deployment.md"
+          }
+        }
+      },
+      {
+        "id": "recovery",
+        "kind": "tool",
+        "description": "Reserved recovery capability: no provider is shipped; requires human approval and successful deployment dependency.",
+        "requires": [
+          "druid.recovery"
+        ],
+        "authority": {
+          "filesystem_read": [
+            "."
+          ],
+          "filesystem_write": [],
+          "network": "denied",
+          "git_commit": false,
+          "git_push": false
+        },
+        "risk": "recoverable",
+        "retry": {
+          "max_attempts": 1
+        },
+        "executor": {
+          "kind": "provider",
+          "capability": "druid.recovery",
+          "provider": "druid_operator",
+          "request": {
+            "mode": "unconfigured",
+            "runbook": "docs/runbooks/recovery.md"
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": {
+          "node": "discovery"
+        },
+        "to": {
+          "node": "inventory"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "inventory"
+        },
+        "to": {
+          "node": "architecture"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "architecture"
+        },
+        "to": {
+          "node": "dependencies"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "dependencies"
+        },
+        "to": {
+          "node": "specification"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "specification"
+        },
+        "to": {
+          "node": "implementation"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "implementation"
+        },
+        "to": {
+          "node": "verification"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "verification"
+        },
+        "to": {
+          "node": "approval"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "approval"
+        },
+        "to": {
+          "node": "deployment"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "deployment"
+        },
+        "to": {
+          "node": "recovery"
+        },
+        "dependency_only": true
+      },
+      {
+        "from": {
+          "node": "approval"
+        },
+        "to": {
+          "node": "recovery"
+        },
+        "dependency_only": true
+      }
+    ]
+  }
+}
