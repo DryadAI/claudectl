@@ -114,7 +114,7 @@ pub struct WorkStatus {
     pub outcome: Outcome,
     pub requirements: Vec<String>,
     pub intended_deliverables: Vec<String>,
-    /// JSON pointers within the supplied runtime report, including verifier evidence.
+    /// JSON pointers within the local report or embedded durable evidence, including verifiers.
     pub evidence: Vec<String>,
     pub blockers: Vec<String>,
 }
@@ -461,13 +461,50 @@ pub fn status(
             }
         }
     }
+    let outcomes = report
+        .map(|r| {
+            r.nodes
+                .iter()
+                .map(|(id, n)| (id.clone(), n.outcome))
+                .collect()
+        })
+        .unwrap_or_default();
+    let links = report
+        .map(|r| {
+            r.nodes
+                .keys()
+                .map(|id| (id.clone(), vec![pointer(id)]))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(project_status(
+        bundle,
+        &observed,
+        &outcomes,
+        &links,
+        report.map(|r| r.run_dir.clone()),
+    ))
+}
+
+fn project_status(
+    bundle: &CompiledMasterPlan,
+    observed: &BTreeSet<String>,
+    outcomes: &BTreeMap<String, Outcome>,
+    links: &BTreeMap<String, Vec<String>>,
+    run_dir: Option<String>,
+) -> PlanStatus {
+    let graph = &bundle.execution;
     let mut work = BTreeMap::new();
     for item in &bundle.source.work {
         let mut evidence = Vec::new();
-        if report.is_some() {
-            evidence.push(pointer(&item.node));
-            evidence.extend(item.verify_with.iter().map(|id| pointer(id)));
-        }
+        evidence.extend(links.get(&item.node).into_iter().flatten().cloned());
+        evidence.extend(
+            item.verify_with
+                .iter()
+                .filter_map(|id| links.get(id))
+                .flatten()
+                .cloned(),
+        );
         let implemented = observed.contains(&item.node);
         let verified = implemented
             && !item.verify_with.is_empty()
@@ -496,7 +533,10 @@ pub fn status(
                 } else {
                     WorkState::Planned
                 },
-                outcome: report.map_or(Outcome::Unknown, |r| r.nodes[&item.node].outcome),
+                outcome: outcomes
+                    .get(&item.node)
+                    .copied()
+                    .unwrap_or(Outcome::Unknown),
                 requirements: item.requirements.clone(),
                 intended_deliverables: item.deliverables.clone(),
                 evidence,
@@ -504,12 +544,142 @@ pub fn status(
             },
         );
     }
-    Ok(PlanStatus {
+    PlanStatus {
         plan_digest: bundle.digest.clone(),
         revision: bundle.source.revision,
-        run_dir: report.map(|r| r.run_dir.clone()),
+        run_dir,
         work,
-    })
+    }
+}
+
+#[cfg(feature = "coord")]
+#[derive(Debug, Serialize)]
+pub struct DurablePlanStatus {
+    #[serde(flatten)]
+    pub plan: PlanStatus,
+    /// Embedded evidence makes every work.evidence JSON pointer independently resolvable.
+    pub durable: super::durable::DurableRunStatus,
+}
+
+#[cfg(feature = "coord")]
+pub(crate) fn status_from_durable(
+    conn: &mut rusqlite::Connection,
+    bundle: &CompiledMasterPlan,
+    run: &str,
+) -> Result<DurablePlanStatus, String> {
+    validate_bundle(bundle)?;
+    // One read transaction prevents joining old task state to newer evidence.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let digest = super::mixed::validate_run_graph(&tx, run, &bundle.execution)?;
+    let durable = super::durable::status_with_connection(&tx, run)?;
+    if durable.graph_id != bundle.execution.spec.id
+        || durable.fingerprint != bundle.execution.fingerprint
+    {
+        return Err("durable run metadata differs from compiled graph".into());
+    }
+    let mut observed = BTreeSet::new();
+    let mut outcomes = BTreeMap::new();
+    let mut links = BTreeMap::new();
+    for (index, result) in durable.nodes.iter().enumerate() {
+        let node = bundle
+            .execution
+            .spec
+            .nodes
+            .iter()
+            .find(|n| n.id == result.node_id)
+            .ok_or("unknown durable node")?;
+        outcomes.insert(node.id.clone(), result.outcome);
+        let mut node_links = Vec::new();
+        if !result.evidence.is_empty() {
+            node_links.push(format!("/durable/nodes/{index}/evidence"));
+        }
+        if result.approval.is_some() {
+            node_links.push(format!("/durable/nodes/{index}/approval"));
+        }
+        if result.latest_verification.is_some() {
+            node_links.push(format!("/durable/nodes/{index}/latest_verification"));
+        }
+        links.insert(node.id.clone(), node_links);
+        match node.kind {
+            NodeKind::Agent => {
+                // Session completion and attached verifier summaries are not an
+                // independent observation that the planned deliverable exists.
+                continue;
+            }
+            NodeKind::Approval => {
+                if let Some(decision) = &result.approval
+                    && (decision.digest != digest
+                        || decision.actor.trim().is_empty()
+                        || decision.reason.trim().is_empty())
+                {
+                    return Err("durable approval does not match the run snapshot".into());
+                }
+                if result.state == "DONE" {
+                    if !result.approval.as_ref().is_some_and(|d| d.approved) {
+                        return Err("completed approval lacks an approving decision".into());
+                    }
+                    observed.insert(node.id.clone());
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if result.attempts > node.retry.max_attempts
+            || result.evidence.len() > result.attempts as usize
+        {
+            return Err(format!(
+                "node '{}' has inconsistent durable attempt counts",
+                node.id
+            ));
+        }
+        for (i, record) in result.evidence.iter().enumerate() {
+            if record.node_id != node.id
+                || record.attempt as usize != i + 1
+                || serde_json::to_value(&record.declared_authority).map_err(|e| e.to_string())?
+                    != serde_json::to_value(&node.authority).map_err(|e| e.to_string())?
+            {
+                return Err(format!(
+                    "node '{}' has inconsistent durable evidence",
+                    node.id
+                ));
+            }
+        }
+        if result.state != "DONE" {
+            continue;
+        }
+        let last = result
+            .evidence
+            .last()
+            .ok_or("completed durable node lacks evidence")?;
+        if result.evidence.len() != result.attempts as usize || last.outcome != Outcome::Pass {
+            return Err(format!(
+                "node '{}' completion lacks matching successful evidence",
+                node.id
+            ));
+        }
+        if last.confidence != EvidenceConfidence::Observed {
+            continue;
+        }
+        if let Some(super::schema::ExecutorSpec::Shell { command, .. }) = &node.executor
+            && (last.command.as_ref() != Some(command) || last.exit_code != Some(0))
+        {
+            return Err(format!(
+                "node '{}' shell PASS lacks matching command and zero exit evidence",
+                node.id
+            ));
+        }
+        observed.insert(node.id.clone());
+    }
+    // Late cancellation can invalidate a prerequisite after execution. Preserve
+    // historical evidence, but never promote its descendants in the current view.
+    observed.retain(|id| {
+        ancestors(id, &bundle.execution)
+            .iter()
+            .all(|dep| outcomes.get(dep) == Some(&Outcome::Pass))
+    });
+    let plan = project_status(bundle, &observed, &outcomes, &links, None);
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(DurablePlanStatus { plan, durable })
 }
 
 #[derive(Debug, Subcommand)]
@@ -527,6 +697,10 @@ pub enum MasterCommand {
         path: PathBuf,
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Read one exact durable run without executing, approving, or migrating it.
+        #[cfg(feature = "coord")]
+        #[arg(long, conflicts_with = "report")]
+        run: Option<String>,
     },
     /// Print the machine-readable input or compiled-bundle schema.
     Schema {
@@ -571,8 +745,22 @@ pub fn dispatch(command: &MasterCommand) -> io::Result<()> {
                 json(&serde_json::json!({"digest": bundle.digest, "output": out}))?
             );
         }
-        MasterCommand::Status { path, report } => {
+        MasterCommand::Status {
+            path,
+            report,
+            #[cfg(feature = "coord")]
+            run,
+        } => {
             let bundle: CompiledMasterPlan = read_json(path)?;
+            #[cfg(feature = "coord")]
+            if let Some(run) = run {
+                let mut conn = crate::coord::store::open_read_only().map_err(io::Error::other)?;
+                println!(
+                    "{}",
+                    json(&status_from_durable(&mut conn, &bundle, run).map_err(io::Error::other)?)?
+                );
+                return Ok(());
+            }
             let report: Option<RunReport> = report.as_ref().map(read_json).transpose()?;
             println!(
                 "{}",

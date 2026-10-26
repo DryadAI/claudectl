@@ -274,6 +274,29 @@ pub(crate) fn node_kind(conn: &Connection, task: &TaskRow) -> Result<Option<Node
     Ok(prepared_task(conn, task)?.map(|p| p.node.kind))
 }
 
+/// Match the full canonical compilation, not just its non-cryptographic fingerprint.
+pub(crate) fn validate_run_graph(
+    conn: &Connection,
+    run: &str,
+    compiled: &CompiledGraph,
+) -> Result<String, String> {
+    let (digest, saved) =
+        snapshot(conn, run)?.ok_or("durable run has no versioned execution snapshot")?;
+    if serde_json::to_value(&saved.compiled).map_err(|e| e.to_string())?
+        != serde_json::to_value(compiled).map_err(|e| e.to_string())?
+    {
+        return Err("durable run belongs to a different master plan/graph revision".into());
+    }
+    let tasks = tasks::list_tasks_for_graph_run(conn, run)?;
+    if tasks.len() != saved.task_ids.len() {
+        return Err("durable run has an incomplete task set".into());
+    }
+    for task in &tasks {
+        prepared_task(conn, task)?.ok_or("durable task has no execution snapshot")?;
+    }
+    Ok(digest)
+}
+
 pub(crate) fn dependencies_done(conn: &Connection, task: &TaskRow) -> Result<bool, String> {
     for id in &task.depends_on {
         if !tasks::get_task(conn, id)?.is_some_and(|t| t.state == TaskState::Done) {

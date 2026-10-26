@@ -9,6 +9,27 @@ fn example() -> MasterPlan {
     serde_json::from_str(include_str!("../examples/druid-master-plan-v1.json")).unwrap()
 }
 
+#[cfg(feature = "coord")]
+#[test]
+fn cli_rejects_ambiguous_local_and_durable_evidence_sources() {
+    let output = Command::new(env!("CARGO_BIN_EXE_claudectl"))
+        .args([
+            "graph",
+            "master",
+            "status",
+            "does-not-exist.json",
+            "--run",
+            "test-run",
+            "--report",
+            "does-not-exist-report.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
 fn edge(from: &str, to: &str) -> EdgeSpec {
     EdgeSpec {
         from: EdgeEndpoint {
