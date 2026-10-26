@@ -33,16 +33,32 @@ use super::tasks::{TaskRow, TaskState, get_task, list_tasks};
 /// outside the reconciler's pure scope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Action {
+    ExecuteGraphNode {
+        task_id: String,
+        expected_attempt: u32,
+    },
+    AwaitGraphApproval {
+        task_id: String,
+    },
     /// Write a `task` message to the role's mailbox. Becomes `ASSIGNED`
     /// once the bus insert lands.
-    AssignViaMailbox { task_id: String, role: String },
+    AssignViaMailbox {
+        task_id: String,
+        role: String,
+    },
     /// Spawn a Claude Code session in `cwd` with the task prompt — used
     /// when the role's mailbox went unclaimed past `claim_timeout`.
-    Spawn { task_id: String, cwd: PathBuf },
+    Spawn {
+        task_id: String,
+        cwd: PathBuf,
+    },
     /// Verifier gate: run a shell/brain/agent verifier for the attempt.
     /// Verifier kind is opaque at this layer; the actuator dispatches
     /// based on the task's verifier list (PR5 / #347).
-    RunVerifier { task_id: String, attempt_id: String },
+    RunVerifier {
+        task_id: String,
+        attempt_id: String,
+    },
     /// Write a per-session policy file (§8). Carries the effective
     /// `force_manual` / `inherit` choice the supervisor computed once at
     /// assignment time. The brain-gate hook reads this file on every
@@ -54,20 +70,30 @@ pub enum Action {
     },
     /// Delete a per-session policy. Issued on any terminal transition
     /// so dangling files don't outlive their task.
-    ClearSessionPolicy { session_id: String },
+    ClearSessionPolicy {
+        session_id: String,
+    },
     /// Escalate to the `operator` role. Carries the cause so the
     /// downstream message body contains the same string the
     /// `task_transitions` row recorded.
-    EscalateHuman { task_id: String, cause: String },
+    EscalateHuman {
+        task_id: String,
+        cause: String,
+    },
     /// Retry a task after verifier failure using the recorded verifier output.
-    Retry { task_id: String },
+    Retry {
+        task_id: String,
+    },
     /// Resume an interrupted task (#347, RFC §7). The actuator marks
     /// `Resuming`, bumps the attempt counter, builds the recovery
     /// context (original prompt + verifier history + autopsy +
     /// tree-state drift warning), and re-enters Assigned. Carries the
     /// cause so the transition log shows whether the session died, was
     /// stalled, or hit a retry-loop trigger.
-    Resume { task_id: String, cause: String },
+    Resume {
+        task_id: String,
+        cause: String,
+    },
 }
 
 /// Knobs governing reconciler behavior. Loaded from
@@ -266,13 +292,42 @@ impl Supervisor {
             let mut slots = self.policy.max_concurrent - in_flight;
 
             for task in retrying.iter().take(slots as usize) {
-                out.push(Action::Retry {
-                    task_id: task.id.clone(),
-                });
+                if let Some(kind) = crate::graph::mixed::node_kind(conn, task)?
+                    && kind != crate::graph::schema::NodeKind::Agent
+                {
+                    if dependency_gate(conn, task)? == DependencyGate::Ready {
+                        out.push(Action::ExecuteGraphNode {
+                            task_id: task.id.clone(),
+                            expected_attempt: super::tasks::attempt_count(conn, &task.id)? + 1,
+                        });
+                    }
+                } else {
+                    out.push(Action::Retry {
+                        task_id: task.id.clone(),
+                    });
+                }
                 slots = slots.saturating_sub(1);
             }
 
             for task in ready.into_iter().take(slots as usize) {
+                if let Some(kind) = crate::graph::mixed::node_kind(conn, task)? {
+                    match kind {
+                        crate::graph::schema::NodeKind::Approval => {
+                            out.push(Action::AwaitGraphApproval {
+                                task_id: task.id.clone(),
+                            });
+                            continue;
+                        }
+                        crate::graph::schema::NodeKind::Agent => {}
+                        _ => {
+                            out.push(Action::ExecuteGraphNode {
+                                task_id: task.id.clone(),
+                                expected_attempt: super::tasks::attempt_count(conn, &task.id)? + 1,
+                            });
+                            continue;
+                        }
+                    }
+                }
                 match &task.role {
                     Some(role) => out.push(Action::AssignViaMailbox {
                         task_id: task.id.clone(),

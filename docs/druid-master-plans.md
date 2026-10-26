@@ -5,12 +5,12 @@ introduced in PR #1. A master plan adds requirements, source provenance, lifecyc
 phases, intended deliverables and independent verification links. Compilation
 emits an ordinary `GraphSpec` consumed by `graph validate|plan|run`.
 
-There is no new scheduler, executor, approval store or supervisor. The existing
-graph compiler owns dependency validation and execution waves; the existing local
-runner owns execution, retries, human prompts and JSONL evidence. Durable V1 still
-accepts only agent DAGs. A complete master plan contains checks and approvals and
-therefore cannot be submitted to that agent-only bridge. Mixed durable execution
-is a future runtime change, not silently approximated by this compiler.
+The master compiler introduces no scheduler or executor. The graph compiler owns
+dependency validation and execution waves; the local runner owns local execution
+and JSONL evidence. PR #3 adds [durable mixed execution](druid-durable-mixed-graphs.md)
+through the existing supervisor, including a persistent approval ledger. Compiled
+master `graph.json` files can use that path subject to its submission restrictions
+and explicit shell opt-in. Durable evidence is not yet exported to master status.
 
 ## Quick start
 
@@ -155,15 +155,16 @@ results. It lists unmet prerequisite/verifier IDs for follow-up.
 The local runner executes shell nodes with caller permissions; its authority
 declarations are not a shell sandbox. Review commands before running untrusted
 plans. A compiler-valid plan is not permission to deploy. The durable path retains
-its structured-tool allowlist, denied general shell access and per-node worktree
-rules from PR #1. Neither runtime's security boundary is relaxed here.
+its agent structured-tool allowlist, denied agent Bash access and per-node worktree
+rules from PR #1. Non-agent shell nodes require the explicit unsandboxed opt-in
+described in the durable mixed-graph documentation.
 
 The compiler checks declared risk and topology; it does not infer the effects of
 arbitrary shell commands. Providers must enforce their own authority contracts.
-Human approval remains the existing runtime prompt, never a field in the plan or
-a result of compilation. Missing provider capability remains UNKNOWN and blocks
+Human approval uses the local runtime prompt or durable digest-bound decision,
+never a field in the plan or a result of compilation. Missing provider capability remains UNKNOWN and blocks
 dependents. Typed edges remain compile-time contracts without runtime artifact
-transport. Worktree integration, durable mixed graphs, cancellation/timeouts,
+transport. Worktree integration, process termination/timeouts,
 signed approvals, automated deployment and automatic recovery remain future work.
 
 ## Validation

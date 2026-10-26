@@ -62,7 +62,36 @@ pub trait SideEffects: VerifierBackend {
 /// stops before the transition is recorded so the next tick re-emits
 /// the action.
 pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Result<(), String> {
+    // Stale or manually constructed agent actions must never route an approval
+    // or command through the session launcher/verifier bypass.
+    let agent_task = match action {
+        Action::AssignViaMailbox { task_id, .. }
+        | Action::Spawn { task_id, .. }
+        | Action::RunVerifier { task_id, .. }
+        | Action::Retry { task_id }
+        | Action::Resume { task_id, .. }
+        | Action::WriteSessionPolicy { task_id, .. } => Some(task_id),
+        _ => None,
+    };
+    if let Some(task_id) = agent_task
+        && let Some(task) = get_task(conn, task_id)?
+        && let Some(kind) = crate::graph::mixed::node_kind(conn, &task)?
+    {
+        if kind != crate::graph::schema::NodeKind::Agent {
+            return Err("non-agent graph nodes cannot use session actions".into());
+        }
+        if !crate::graph::mixed::dependencies_done(conn, &task)? {
+            return Err("graph agent dependencies are not complete".into());
+        }
+    }
     match action {
+        Action::ExecuteGraphNode {
+            task_id,
+            expected_attempt,
+        } => crate::graph::mixed::execute(conn, task_id, *expected_attempt),
+        Action::AwaitGraphApproval { task_id } => {
+            crate::graph::mixed::await_approval(conn, task_id)
+        }
         Action::AssignViaMailbox { task_id, role } => {
             let task =
                 get_task(conn, task_id)?.ok_or_else(|| format!("task {task_id} not found"))?;
@@ -667,6 +696,55 @@ mod tests {
         assert_eq!(task.state, TaskState::Running);
         let hist = list_transitions(&conn, &id).unwrap();
         assert_eq!(hist.last().unwrap().2, "spawned");
+    }
+
+    #[test]
+    fn mixed_graph_gate_cannot_be_spawned_retried_resumed_or_verified_as_an_agent() {
+        let mut conn = store::open_memory();
+        let graph = crate::graph::compiler::compile(serde_json::from_value(serde_json::json!({
+            "version":1, "id":"guard-actions", "nodes":[{"id":"gate", "kind":"approval", "requires":["human.approval"]}]
+        })).unwrap()).unwrap();
+        let submitted =
+            crate::graph::durable::submit_with_options(&mut conn, &graph, false).unwrap();
+        let id = submitted.task_ids["gate"].clone();
+        let fx = RecordingFx::default();
+        for action in [
+            Action::Spawn {
+                task_id: id.clone(),
+                cwd: ".".into(),
+            },
+            Action::AssignViaMailbox {
+                task_id: id.clone(),
+                role: "test".into(),
+            },
+            Action::Retry {
+                task_id: id.clone(),
+            },
+            Action::Resume {
+                task_id: id.clone(),
+                cause: "test".into(),
+            },
+            Action::RunVerifier {
+                task_id: id.clone(),
+                attempt_id: "test".into(),
+            },
+        ] {
+            assert!(apply(&mut conn, &fx, &action).is_err());
+        }
+        assert!(fx.spawned.borrow().is_empty());
+        assert!(fx.published.borrow().is_empty());
+        apply(
+            &mut conn,
+            &fx,
+            &Action::AwaitGraphApproval {
+                task_id: id.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            get_task(&conn, &id).unwrap().unwrap().state,
+            TaskState::AwaitingApproval
+        );
     }
 
     #[test]

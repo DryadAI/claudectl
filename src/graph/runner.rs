@@ -186,7 +186,7 @@ fn first_non_passing_dependency(
         .cloned()
 }
 
-fn execute_once(
+pub(crate) fn execute_once(
     node: &NodeSpec,
     fingerprint: &str,
     attempt: u32,
