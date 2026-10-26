@@ -97,10 +97,13 @@ effects**. Commands/providers execute synchronously in the actuator; a hung call
 can stall daemon reconciliation. There is no new timeout or process-termination
 contract. Use short, bounded operations in a dedicated test daemon.
 
-PR #2's `graph master status --report` still consumes local-runner reports. Durable
-status is a separate execution view, not yet a master-plan report exporter. In
-particular, agent DONE is not automatically proof of independent verification;
-inspect its recorded verifier evidence. No production verification is inferred.
+`graph master status plan.json --report FILE` consumes local-runner reports;
+`graph master status plan.json --run RUN_ID` now provides a read-only projection
+of one exact durable run. The latter embeds execution evidence and approval
+decisions alongside work states. It does not fabricate local-runner evidence or
+mix runs. Agent DONE is not automatically proof of a planned deliverable or
+independent verification; inspect its recorded verifier evidence. No production
+verification is inferred. See the [master-plan status contract](druid-master-plans.md).
 
 ## Authority and upgrade safety
 

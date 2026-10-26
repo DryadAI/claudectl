@@ -723,3 +723,340 @@ fn generic_agent_completion_cannot_skip_a_waiting_graph_approval() {
     );
     assert_eq!(state(&conn, id), TaskState::Pending);
 }
+
+fn master_fixture() -> super::super::master::CompiledMasterPlan {
+    let mut source: super::super::master::MasterPlan =
+        serde_json::from_str(include_str!("../../../examples/druid-master-plan-v1.json")).unwrap();
+    for node in &mut source.graph.nodes {
+        if let Some(ExecutorSpec::Shell { command, .. }) = &mut node.executor {
+            *command = "printf 'local projection test'".into();
+        }
+    }
+    super::super::master::compile(source).unwrap()
+}
+
+fn run_master_checks(
+    conn: &mut Connection,
+    bundle: &super::super::master::CompiledMasterPlan,
+    submission: &DurableSubmission,
+    base: &Path,
+) {
+    for wave in &bundle.execution.waves {
+        for id in wave {
+            let node = bundle
+                .execution
+                .spec
+                .nodes
+                .iter()
+                .find(|n| &n.id == id)
+                .unwrap();
+            if matches!(node.executor, Some(ExecutorSpec::Shell { .. })) {
+                run(conn, &submission.task_ids[id], base);
+            }
+        }
+    }
+}
+
+#[test]
+fn durable_projection_tracks_planned_implemented_verified_with_resolvable_evidence() {
+    use super::super::master::{WorkState, status_from_durable};
+    let mut conn = store::open_memory();
+    let bundle = master_fixture();
+    let r = submit(&mut conn, &bundle.execution);
+    let initial = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert!(
+        initial
+            .plan
+            .work
+            .values()
+            .all(|w| w.state == WorkState::Planned && w.evidence.is_empty())
+    );
+    assert!(initial.plan.run_dir.is_none());
+    let base = tempfile::tempdir().unwrap();
+    run(&mut conn, &r.task_ids["discovery"], base.path());
+    let partial = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(partial.plan.work["discovery"].state, WorkState::Implemented);
+    assert!(
+        partial.plan.work["discovery"]
+            .blockers
+            .contains(&"verification".to_string())
+    );
+    run_master_checks(&mut conn, &bundle, &r, base.path());
+    await_approval(&mut conn, &r.task_ids["approval"]).unwrap();
+    let verified = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(
+        verified.plan.work["implementation"].state,
+        WorkState::Verified
+    );
+    assert_eq!(verified.plan.work["approval"].state, WorkState::Planned);
+    assert_eq!(verified.durable.effective_state, "AWAITING_APPROVAL");
+    decide_with_connection(&mut conn, &r.graph_run_id, "approval", &decision(&r, true)).unwrap();
+    run(&mut conn, &r.task_ids["deployment"], base.path()); // Unconfigured provider: UNKNOWN.
+    let final_status = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(
+        final_status.plan.work["approval"].state,
+        WorkState::Implemented
+    );
+    assert_eq!(
+        final_status.plan.work["deployment"].state,
+        WorkState::Planned
+    );
+    assert_eq!(
+        final_status.plan.work["deployment"].outcome,
+        Outcome::Unknown
+    );
+    let json = serde_json::to_value(&final_status).unwrap();
+    for work in final_status.plan.work.values() {
+        for pointer in &work.evidence {
+            assert!(
+                json.pointer(pointer).is_some(),
+                "unresolved evidence pointer: {pointer}"
+            );
+        }
+    }
+    assert_eq!(
+        final_status.durable.approval_digest.as_deref(),
+        Some(r.approval_digest.as_str())
+    );
+}
+
+#[test]
+fn durable_projection_reads_readonly_reopened_database_without_mutation() {
+    let mut conn = store::open_memory();
+    let bundle = master_fixture();
+    let r = submit(&mut conn, &bundle.execution);
+    let base = tempfile::tempdir().unwrap();
+    run(&mut conn, &r.task_ids["discovery"], base.path());
+    let db = base.path().join("readonly.db");
+    conn.execute("VACUUM INTO ?1", [db.to_str().unwrap()])
+        .unwrap();
+    drop(conn);
+    let before = std::fs::read(&db).unwrap();
+    let mut read_only =
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let result =
+        super::super::master::status_from_durable(&mut read_only, &bundle, &r.graph_run_id)
+            .unwrap();
+    assert_eq!(
+        result.plan.work["discovery"].state,
+        super::super::master::WorkState::Implemented
+    );
+    assert_eq!(read_only.total_changes(), 0);
+    drop(read_only);
+    assert_eq!(std::fs::read(db).unwrap(), before);
+}
+
+#[test]
+fn durable_projection_rejects_other_revision_missing_tasks_and_metadata_drift() {
+    let bundle = master_fixture();
+    let mut conn = store::open_memory();
+    let r = submit(&mut conn, &bundle.execution);
+    let mut changed = bundle.source.clone();
+    changed.requirements[0].description.push_str(" modified");
+    let other = super::super::master::compile(changed).unwrap();
+    assert!(
+        super::super::master::status_from_durable(&mut conn, &other, &r.graph_run_id)
+            .unwrap_err()
+            .contains("different master plan")
+    );
+    for sql in [
+        "UPDATE tasks SET graph_run_id='another-run' WHERE graph_node_id='discovery'",
+        "UPDATE graph_runs SET fingerprint='forged'",
+        "UPDATE tasks SET depends_on='[\"foreign-task\"]'",
+        "DELETE FROM graph_snapshots",
+    ] {
+        let mut conn = store::open_memory();
+        let r = submit(&mut conn, &bundle.execution);
+        conn.execute(sql, []).unwrap();
+        assert!(
+            super::super::master::status_from_durable(&mut conn, &bundle, &r.graph_run_id).is_err(),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn durable_projection_does_not_promote_uncertain_attempts_or_cancelled_descendants() {
+    use super::super::master::{WorkState, status_from_durable};
+    let mut conn = store::open_memory();
+    let bundle = master_fixture();
+    let r = submit(&mut conn, &bundle.execution);
+    claim(&mut conn, &r.task_ids["discovery"], 1)
+        .unwrap()
+        .unwrap();
+    let status = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(status.plan.work["discovery"].state, WorkState::Planned);
+    assert!(status.plan.work["discovery"].evidence.is_empty());
+    let mut conn = store::open_memory();
+    let r = submit(&mut conn, &bundle.execution);
+    let base = tempfile::tempdir().unwrap();
+    run_master_checks(&mut conn, &bundle, &r, base.path());
+    tasks::transition(
+        &mut conn,
+        &r.task_ids["discovery"],
+        TaskState::Done,
+        TaskState::Cancelled,
+        "operator-cancel",
+    )
+    .unwrap();
+    let status = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert!(
+        status
+            .plan
+            .work
+            .values()
+            .all(|w| w.state == WorkState::Planned)
+    );
+    assert_eq!(status.plan.work["discovery"].outcome, Outcome::Error);
+    assert!(!status.plan.work["verification"].evidence.is_empty());
+}
+
+#[test]
+fn durable_projection_rejects_forged_success_evidence() {
+    for mutation in 0..5 {
+        let mut conn = store::open_memory();
+        let bundle = master_fixture();
+        let r = submit(&mut conn, &bundle.execution);
+        let base = tempfile::tempdir().unwrap();
+        run(&mut conn, &r.task_ids["discovery"], base.path());
+        let mut record = evidence(&conn, &r.task_ids["discovery"]).unwrap().remove(0);
+        match mutation {
+            0 => record.command = Some("different command".into()),
+            1 => record.exit_code = Some(1),
+            2 => record.attempt = 2,
+            3 => record
+                .declared_authority
+                .filesystem_read
+                .push("/outside".into()),
+            _ => record.outcome = Outcome::Fail,
+        }
+        conn.execute(
+            "UPDATE graph_node_evidence SET record_json=?1",
+            [serde_json::to_string(&record).unwrap()],
+        )
+        .unwrap();
+        assert!(
+            super::super::master::status_from_durable(&mut conn, &bundle, &r.graph_run_id).is_err()
+        );
+    }
+}
+
+#[test]
+fn durable_projection_never_promotes_derived_provider_pass_to_verified() {
+    let mut source = master_fixture().source;
+    let discovery = &mut source.graph.nodes[0];
+    discovery.requires = vec!["test.read".into()];
+    discovery.executor = Some(ExecutorSpec::Provider {
+        capability: "test.read".into(),
+        provider: None,
+        request: json!({}),
+    });
+    discovery.authority.filesystem_read.clear();
+    let bundle = super::super::master::compile(source).unwrap();
+    let mut conn = store::open_memory();
+    let r = submit(&mut conn, &bundle.execution);
+    let claim = claim(&mut conn, &r.task_ids["discovery"], 1)
+        .unwrap()
+        .unwrap();
+    let provider = ReadProvider;
+    let mut registry = ProviderRegistry::new();
+    registry.register(&provider);
+    let base = tempfile::tempdir().unwrap();
+    let mut record = super::super::runner::execute_once(
+        &claim.node,
+        &claim.fingerprint,
+        claim.attempt,
+        &registry,
+        base.path(),
+    )
+    .unwrap();
+    record.confidence = super::super::runner::EvidenceConfidence::Derived;
+    finish(&mut conn, &claim, &record).unwrap();
+    run_master_checks(&mut conn, &bundle, &r, base.path());
+    let status =
+        super::super::master::status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(status.plan.work["discovery"].outcome, Outcome::Pass);
+    assert_eq!(
+        status.plan.work["discovery"].state,
+        super::super::master::WorkState::Planned
+    );
+}
+
+#[test]
+fn durable_projection_keeps_agent_done_distinct_from_verified_deliverable() {
+    let mut source = master_fixture().source;
+    let agent = source
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "implementation")
+        .unwrap();
+    agent.kind = NodeKind::Agent;
+    agent.requires = vec!["agent.execute".into()];
+    agent.workspace.mode = WorkspaceMode::Worktree;
+    agent.executor = Some(ExecutorSpec::Provider {
+        capability: "agent.execute".into(),
+        provider: None,
+        request: json!({"cwd":".","prompt":"test only; no real launch"}),
+    });
+    let bundle = super::super::master::compile(source).unwrap();
+    let mut conn = store::open_memory();
+    let r = submit(&mut conn, &bundle.execution);
+    let base = tempfile::tempdir().unwrap();
+    for wave in &bundle.execution.waves {
+        for id in wave {
+            if id == "implementation" {
+                tasks::transition(
+                    &mut conn,
+                    &r.task_ids[id],
+                    TaskState::Pending,
+                    TaskState::Done,
+                    "test-agent-done",
+                )
+                .unwrap();
+            } else if matches!(
+                bundle
+                    .execution
+                    .spec
+                    .nodes
+                    .iter()
+                    .find(|n| &n.id == id)
+                    .unwrap()
+                    .executor,
+                Some(ExecutorSpec::Shell { .. })
+            ) {
+                run(&mut conn, &r.task_ids[id], base.path());
+            }
+        }
+    }
+    let status =
+        super::super::master::status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(status.plan.work["implementation"].outcome, Outcome::Pass);
+    assert_eq!(
+        status.plan.work["implementation"].state,
+        super::super::master::WorkState::Planned
+    );
+    assert!(!status.plan.work["implementation"].evidence.is_empty()); // Verifier link, not proof of the deliverable.
+}
+
+#[test]
+fn durable_projection_rejects_approval_digest_drift_and_unproven_done() {
+    let bundle = master_fixture();
+    for mutation in [
+        "UPDATE graph_approvals SET digest='wrong-run'",
+        "DELETE FROM graph_node_evidence",
+    ] {
+        let mut conn = store::open_memory();
+        let r = submit(&mut conn, &bundle.execution);
+        let base = tempfile::tempdir().unwrap();
+        run_master_checks(&mut conn, &bundle, &r, base.path());
+        await_approval(&mut conn, &r.task_ids["approval"]).unwrap();
+        decide_with_connection(&mut conn, &r.graph_run_id, "approval", &decision(&r, true))
+            .unwrap();
+        conn.execute(mutation, []).unwrap();
+        assert!(
+            super::super::master::status_from_durable(&mut conn, &bundle, &r.graph_run_id).is_err(),
+            "{mutation}"
+        );
+    }
+}

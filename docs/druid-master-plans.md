@@ -10,7 +10,8 @@ dependency validation and execution waves; the local runner owns local execution
 and JSONL evidence. PR #3 adds [durable mixed execution](druid-durable-mixed-graphs.md)
 through the existing supervisor, including a persistent approval ledger. Compiled
 master `graph.json` files can use that path subject to its submission restrictions
-and explicit shell opt-in. Durable evidence is not yet exported to master status.
+and explicit shell opt-in. `graph master status plan.json --run RUN_ID` projects
+one exact durable run into the same work-state model without executing anything.
 
 ## Quick start
 
@@ -23,6 +24,35 @@ claudectl graph validate /tmp/druid-plan-r1/graph.json
 claudectl graph plan /tmp/druid-plan-r1/graph.json
 claudectl graph master status /tmp/druid-plan-r1/plan.json
 ```
+
+To inspect a previously submitted durable run (requires the `coord` feature):
+
+```sh
+claudectl graph master status /tmp/druid-plan-r1/plan.json --run RUN_ID
+```
+
+`--run` and `--report` are mutually exclusive; evidence from different executions
+is never combined. This command opens the existing coordination database read-only
+and reads one consistent transaction. It does not submit, approve, execute, create
+or migrate a ledger. A missing/legacy snapshot, changed plan, missing task or
+inconsistent evidence fails closed. Matching checks compare the full saved
+canonical compilation, not only the graph fingerprint.
+
+Durable output retains the `work` map and embeds a `durable` execution object with
+the run ID, approval digest, task IDs, attempt counts, evidence and decisions.
+Each work item's evidence paths resolve within this output. `run_dir` is null
+because the evidence belongs to the SQLite ledger, not a local JSONL run directory.
+Observed successful executor evidence promotes work to implemented; the declared
+independent observed checks are still required for verified. A valid approval
+decision completes the approval phase but never counts as an independent check.
+Agent DONE/verifier summaries alone do not establish the planned deliverable;
+their work remains planned, with the execution outcome and available evidence
+shown separately. UNKNOWN, cancelled and non-observed results do not promote
+work. Late cancellation also prevents promotion of descendants while preserving
+their historical evidence links. This view is not an execution authorization.
+
+See the [durable status validation record](validation/druid-durable-plan-status.md)
+for the read-only, identity, evidence and cancellation regression tests.
 
 The output directory must not exist. Compilation writes:
 

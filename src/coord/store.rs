@@ -89,6 +89,18 @@ pub fn open() -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Inspect an existing ledger without creating directories or migrating its schema.
+pub fn open_read_only() -> Result<Connection, String> {
+    open_read_only_at(&db_path())
+}
+
+fn open_read_only_at(path: &std::path::Path) -> Result<Connection, String> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open existing coord DB read-only: {e}"))?;
+    check_schema_version(&conn)?;
+    Ok(conn)
+}
+
 /// Open an in-memory database (for testing and evals).
 pub fn open_memory() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
@@ -1494,6 +1506,32 @@ mod tests {
         migrate(&conn).unwrap();
         // Triple-migrate too — `IF NOT EXISTS` should make this a no-op.
         migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn readonly_open_never_creates_or_migrates_a_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing/coord.db");
+        assert!(open_read_only_at(&missing).is_err());
+        assert!(!missing.parent().unwrap().exists());
+        let path = dir.path().join("existing.db");
+        let db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "user_version", 1).unwrap();
+        drop(db);
+        let read = open_read_only_at(&path).unwrap();
+        let version: u32 = read
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        assert!(read.execute("CREATE TABLE unexpected(id)", []).is_err());
+        drop(read);
+        let db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "user_version", EXPECTED_COORD_SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(db);
+        let before = std::fs::read(&path).unwrap();
+        assert!(open_read_only_at(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
