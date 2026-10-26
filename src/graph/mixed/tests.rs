@@ -821,6 +821,68 @@ fn durable_projection_tracks_planned_implemented_verified_with_resolvable_eviden
 }
 
 #[test]
+fn durable_projection_preserves_failed_retry_before_observed_success() {
+    use super::super::master::{WorkState, status_from_durable};
+    let base = tempfile::tempdir().unwrap();
+    let mut source = master_fixture().source;
+    source.graph.policy.max_attempts_per_node = 2;
+    let discovery = source
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "discovery")
+        .unwrap();
+    discovery.retry.max_attempts = 2;
+    discovery.executor = Some(ExecutorSpec::Shell {
+        command: "test -f ready".into(),
+        cwd: Some(base.path().to_string_lossy().into_owned()),
+    });
+    let bundle = super::super::master::compile(source).unwrap();
+    let mut conn = store::open_memory();
+    let r = submit(&mut conn, &bundle.execution);
+    let id = &r.task_ids["discovery"];
+
+    run(&mut conn, id, base.path());
+    assert_eq!(state(&conn, id), TaskState::Retrying);
+    let failed = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(failed.plan.work["discovery"].state, WorkState::Planned);
+    assert!(!failed.plan.work["discovery"].evidence.is_empty());
+
+    // A claimed retry without a result must not borrow the earlier evidence.
+    let second = claim(&mut conn, id, 2).unwrap().unwrap();
+    let uncertain = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(uncertain.plan.work["discovery"].state, WorkState::Planned);
+    std::fs::write(base.path().join("ready"), "test fixture").unwrap();
+    let record = super::super::runner::execute_once(
+        &second.node,
+        &second.fingerprint,
+        second.attempt,
+        &ProviderRegistry::new(),
+        base.path(),
+    )
+    .unwrap();
+    finish(&mut conn, &second, &record).unwrap();
+    let implemented = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(
+        implemented.plan.work["discovery"].state,
+        WorkState::Implemented
+    );
+    run_master_checks(&mut conn, &bundle, &r, base.path());
+    let verified = status_from_durable(&mut conn, &bundle, &r.graph_run_id).unwrap();
+    assert_eq!(verified.plan.work["discovery"].state, WorkState::Verified);
+    let result = verified
+        .durable
+        .nodes
+        .iter()
+        .find(|n| n.task_id == *id)
+        .unwrap();
+    assert_eq!(result.attempts, 2);
+    assert_eq!(result.evidence.len(), 2);
+    assert_eq!(result.evidence[0].outcome, Outcome::Fail);
+    assert_eq!(result.evidence[1].outcome, Outcome::Pass);
+}
+
+#[test]
 fn durable_projection_reads_readonly_reopened_database_without_mutation() {
     let mut conn = store::open_memory();
     let bundle = master_fixture();
