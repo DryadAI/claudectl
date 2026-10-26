@@ -30,6 +30,7 @@ pub enum TaskState {
     Retrying,
     Resuming,
     NeedsHuman,
+    AwaitingApproval,
     Cancelled,
 }
 
@@ -45,6 +46,7 @@ impl TaskState {
             Self::Retrying => "RETRYING",
             Self::Resuming => "RESUMING",
             Self::NeedsHuman => "NEEDS_HUMAN",
+            Self::AwaitingApproval => "AWAITING_APPROVAL",
             Self::Cancelled => "CANCELLED",
         }
     }
@@ -60,6 +62,7 @@ impl TaskState {
             "RETRYING" => Some(Self::Retrying),
             "RESUMING" => Some(Self::Resuming),
             "NEEDS_HUMAN" => Some(Self::NeedsHuman),
+            "AWAITING_APPROVAL" => Some(Self::AwaitingApproval),
             "CANCELLED" => Some(Self::Cancelled),
             _ => None,
         }
@@ -261,6 +264,20 @@ pub fn transition(
     cause: &str,
 ) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| format!("begin tx: {e}"))?;
+    transition_in_transaction(&tx, task_id, from_state, new_state, cause)?;
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
+    Ok(())
+}
+
+/// Caller must hold a transaction when combining this with attempts/evidence.
+pub(crate) fn transition_in_transaction(
+    tx: &Connection,
+    task_id: &str,
+    from_state: TaskState,
+    new_state: TaskState,
+    cause: &str,
+) -> Result<(), String> {
+    crate::graph::mixed::guard_transition(tx, task_id, from_state, new_state)?;
     let now = now();
     let affected = tx
         .execute(
@@ -292,10 +309,9 @@ pub fn transition(
         .map_err(|e| format!("read graph run id: {e}"))?
         .flatten();
     if let Some(graph_run_id) = graph_run_id {
-        refresh_graph_run_state(&tx, &graph_run_id)?;
+        refresh_graph_run_state(tx, &graph_run_id)?;
     }
 
-    tx.commit().map_err(|e| format!("commit: {e}"))?;
     Ok(())
 }
 
@@ -326,6 +342,8 @@ fn refresh_graph_run_state(conn: &Connection, graph_run_id: &str) -> Result<(), 
         )
     }) {
         "RUNNING"
+    } else if states.iter().any(|state| state == "AWAITING_APPROVAL") {
+        "AWAITING_APPROVAL"
     } else {
         "PENDING"
     };
@@ -632,7 +650,13 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     Ok(TaskRow {
         id: row.get(0)?,
         name: row.get(1)?,
-        state: TaskState::parse(&state_str).unwrap_or(TaskState::Pending),
+        state: TaskState::parse(&state_str).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                format!("unknown task state: {state_str}").into(),
+            )
+        })?,
         role: row.get(3)?,
         cwd: row.get(4)?,
         prompt: row.get(5)?,

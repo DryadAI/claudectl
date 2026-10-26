@@ -436,6 +436,7 @@ Press `R` on any session for a highlight reel GIF (edits, commands, errors — i
 |---|---|
 | [DRUID Master Plans](docs/druid-master-plans.md) | Versioned graph compilation, requirements, evidence-linked status |
 | [Graph Runtime](docs/graph-bootstrap.md) | Canonical IR, local execution, durable supervisor |
+| [Durable Mixed Graphs](docs/druid-durable-mixed-graphs.md) | One supervisor, persisted evidence, digest-bound human approval |
 | [Quick Start](docs/quickstart.md) | Install, init, first dashboard |
 | [Reference](docs/reference.md) | All flags, keybindings, modes |
 | [Configuration](docs/configuration.md) | Config files, hooks, rules |

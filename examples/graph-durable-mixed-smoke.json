@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "id": "druid-durable-mixed-smoke-v1",
+  "goal": "Exercise one supervisor with local, provider, isolated agent, and approval nodes; no deployment",
+  "nodes": [
+    {
+      "id": "inventory",
+      "kind": "command",
+      "requires": ["shell.execute"],
+      "risk": "low",
+      "executor": {"kind": "shell", "command": "printf 'mixed-graph smoke test\\n'", "cwd": "."}
+    },
+    {
+      "id": "capabilities",
+      "kind": "tool",
+      "requires": ["reverse.capabilities.discover"],
+      "risk": "low",
+      "executor": {"kind": "provider", "capability": "reverse.capabilities.discover", "provider": "rea", "request": {}}
+    },
+    {
+      "id": "agent-marker",
+      "kind": "agent",
+      "requires": ["agent.execute"],
+      "workspace": {"mode": "worktree"},
+      "authority": {"filesystem_read": ["./**"], "filesystem_write": ["DRUID_MIXED_SMOKE.txt"]},
+      "executor": {
+        "kind": "provider",
+        "capability": "agent.execute",
+        "provider": "claude_code",
+        "request": {
+          "cwd": ".",
+          "prompt": "Using the Write tool, create DRUID_MIXED_SMOKE.txt containing mixed-graph smoke passed in this isolated worktree. Do not use Bash, commit, push, deploy, or change any other file.",
+          "verify": [{"kind": "run", "command": "test -f DRUID_MIXED_SMOKE.txt"}]
+        }
+      }
+    },
+    {
+      "id": "review",
+      "kind": "approval",
+      "requires": ["human.approval"],
+      "description": "Review this run's provider and agent-verifier evidence; approve only the following harmless confirmation"
+    },
+    {
+      "id": "confirmation",
+      "kind": "check",
+      "requires": ["shell.execute"],
+      "risk": "low",
+      "description": "Confirms gate release, not independent verification of the agent worktree",
+      "executor": {"kind": "shell", "command": "printf 'approval gate released\\n'", "cwd": "."}
+    }
+  ],
+  "edges": [
+    {"from": {"node": "inventory"}, "to": {"node": "capabilities"}, "dependency_only": true},
+    {"from": {"node": "capabilities"}, "to": {"node": "agent-marker"}, "dependency_only": true},
+    {"from": {"node": "agent-marker"}, "to": {"node": "review"}, "dependency_only": true},
+    {"from": {"node": "review"}, "to": {"node": "confirmation"}, "dependency_only": true}
+  ]
+}

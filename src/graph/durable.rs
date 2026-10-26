@@ -33,6 +33,7 @@ pub struct DurableSubmission {
     pub graph_run_id: String,
     pub graph_id: String,
     pub fingerprint: String,
+    pub approval_digest: String,
     pub task_ids: BTreeMap<String, String>,
 }
 
@@ -43,6 +44,8 @@ pub struct DurableNodeStatus {
     pub state: String,
     pub outcome: Outcome,
     pub latest_verification: Option<(String, String)>,
+    pub evidence: Vec<super::runner::EvidenceRecord>,
+    pub approval: Option<super::mixed::ApprovalDecision>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,15 +53,19 @@ pub struct DurableRunStatus {
     pub graph_run_id: String,
     pub graph_id: String,
     pub fingerprint: String,
+    pub approval_digest: Option<String>,
     pub stored_state: String,
     pub effective_state: String,
     pub outcome: Outcome,
     pub nodes: Vec<DurableNodeStatus>,
 }
 
-pub fn submit(compiled: &CompiledGraph) -> Result<DurableSubmission, String> {
+pub fn submit(
+    compiled: &CompiledGraph,
+    allow_unsandboxed_shell: bool,
+) -> Result<DurableSubmission, String> {
     let mut conn = store::open()?;
-    submit_with_connection(&mut conn, compiled)
+    submit_with_options(&mut conn, compiled, allow_unsandboxed_shell)
 }
 
 pub fn status(graph_run_id: &str) -> Result<DurableRunStatus, String> {
@@ -66,7 +73,7 @@ pub fn status(graph_run_id: &str) -> Result<DurableRunStatus, String> {
     status_with_connection(&conn, graph_run_id)
 }
 
-fn status_with_connection(
+pub(crate) fn status_with_connection(
     conn: &Connection,
     graph_run_id: &str,
 ) -> Result<DurableRunStatus, String> {
@@ -90,6 +97,20 @@ fn status_with_connection(
     let mut nodes = Vec::with_capacity(tasks.len());
     for task in &tasks {
         let latest_verification = tasks::latest_verification(conn, &task.id)?;
+        let evidence = super::mixed::evidence(conn, &task.id)?;
+        let approval = super::mixed::approval(conn, &task.id)?;
+        let outcome = if task.state == tasks::TaskState::NeedsHuman {
+            if approval.as_ref().is_some_and(|decision| !decision.approved) {
+                Outcome::Fail
+            } else {
+                evidence
+                    .last()
+                    .map(|e| e.outcome)
+                    .unwrap_or_else(|| task_outcome(task.state, latest_verification.as_ref()))
+            }
+        } else {
+            task_outcome(task.state, latest_verification.as_ref())
+        };
         nodes.push(DurableNodeStatus {
             node_id: task
                 .graph_node_id
@@ -97,8 +118,10 @@ fn status_with_connection(
                 .unwrap_or_else(|| task.name.clone()),
             task_id: task.id.clone(),
             state: task.state.as_str().to_string(),
-            outcome: task_outcome(task.state, latest_verification.as_ref()),
+            outcome,
             latest_verification,
+            evidence,
+            approval,
         });
     }
 
@@ -130,6 +153,11 @@ fn status_with_connection(
         )
     }) {
         "RUNNING"
+    } else if tasks
+        .iter()
+        .any(|task| task.state == tasks::TaskState::AwaitingApproval)
+    {
+        "AWAITING_APPROVAL"
     } else {
         "PENDING"
     }
@@ -149,6 +177,7 @@ fn status_with_connection(
         graph_run_id: graph_run_id.to_string(),
         graph_id: run.0,
         fingerprint: run.1,
+        approval_digest: super::mixed::snapshot(conn, graph_run_id)?.map(|(digest, _)| digest),
         stored_state: run.2,
         effective_state,
         outcome,
@@ -175,11 +204,27 @@ fn task_outcome(
     }
 }
 
+#[cfg(test)]
 fn submit_with_connection(
     conn: &mut Connection,
     compiled: &CompiledGraph,
 ) -> Result<DurableSubmission, String> {
+    submit_with_options(conn, compiled, false)
+}
+
+pub(crate) fn submit_with_options(
+    conn: &mut Connection,
+    compiled: &CompiledGraph,
+    allow_unsandboxed_shell: bool,
+) -> Result<DurableSubmission, String> {
+    let rebuilt = super::compiler::compile(compiled.spec.clone()).map_err(|e| e.to_string())?;
+    if serde_json::to_value(&rebuilt).map_err(|e| e.to_string())?
+        != serde_json::to_value(compiled).map_err(|e| e.to_string())?
+    {
+        return Err("compiled graph does not match canonical compilation".into());
+    }
     validate_durable_graph(compiled)?;
+    let prepared = super::mixed::prepare(compiled, allow_unsandboxed_shell)?;
 
     let graph_run_id = store::gen_id("graph");
     let task_ids: BTreeMap<String, String> = compiled
@@ -200,8 +245,29 @@ fn submit_with_connection(
     )
     .map_err(|e| format!("insert graph run: {e}"))?;
 
+    let approval_digest = super::mixed::save_snapshot(
+        &tx,
+        &graph_run_id,
+        compiled,
+        &prepared,
+        &task_ids,
+        allow_unsandboxed_shell,
+    )?;
+
     for node in &compiled.spec.nodes {
-        let request = agent_request(node)?;
+        let request = if node.kind == NodeKind::Agent {
+            agent_request(node)?
+        } else {
+            AgentTaskRequest {
+                cwd: prepared[&node.id].cwd.clone(),
+                prompt: node.description.clone().unwrap_or_else(|| node.id.clone()),
+                role: None,
+                model: None,
+                budget_usd: None,
+                timeout_min: None,
+                verify: vec![],
+            }
+        };
         let source_cwd = std::fs::canonicalize(&request.cwd).map_err(|e| {
             format!(
                 "agent node '{}' cannot resolve request.cwd '{}': {e}",
@@ -241,6 +307,7 @@ fn submit_with_connection(
             depends_on: dependency_ids,
             policy: Some(serde_json::json!({
                 "graph": {
+                    "snapshot_version": 1,
                     "run_id": graph_run_id.as_str(),
                     "graph_id": compiled.spec.id.as_str(),
                     "node_id": node.id.as_str(),
@@ -267,6 +334,7 @@ fn submit_with_connection(
         graph_run_id,
         graph_id: compiled.spec.id.clone(),
         fingerprint: compiled.fingerprint.clone(),
+        approval_digest,
         task_ids,
     })
 }
@@ -274,10 +342,7 @@ fn submit_with_connection(
 fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
     for node in &compiled.spec.nodes {
         if node.kind != NodeKind::Agent {
-            return Err(format!(
-                "durable supervisor V1 accepts only agent nodes; '{}' is {:?}",
-                node.id, node.kind
-            ));
+            continue;
         }
         let ExecutorSpec::Provider {
             capability,
@@ -630,9 +695,10 @@ mod tests {
     }
 
     #[test]
-    fn durable_submission_rejects_non_agent_nodes() {
+    fn durable_submission_rejects_agent_executor_disguised_as_check() {
         let mut node = agent("a");
         node.kind = NodeKind::Check;
+        node.workspace.mode = WorkspaceMode::Shared;
         let compiled = compiler::compile(GraphSpec {
             version: 1,
             id: "bad".into(),
@@ -644,6 +710,6 @@ mod tests {
         .unwrap();
         let mut conn = store::open_memory();
         let err = submit_with_connection(&mut conn, &compiled).unwrap_err();
-        assert!(err.contains("only agent nodes"));
+        assert!(err.contains("agent.execute requires an agent node"));
     }
 }

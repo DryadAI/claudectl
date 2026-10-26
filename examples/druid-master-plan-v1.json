@@ -400,9 +400,7 @@
           "druid.deployment"
         ],
         "authority": {
-          "filesystem_read": [
-            "."
-          ],
+          "filesystem_read": [],
           "filesystem_write": [],
           "network": "denied",
           "git_commit": false,
@@ -430,9 +428,7 @@
           "druid.recovery"
         ],
         "authority": {
-          "filesystem_read": [
-            "."
-          ],
+          "filesystem_read": [],
           "filesystem_write": [],
           "network": "denied",
           "git_commit": false,

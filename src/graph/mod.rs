@@ -4,6 +4,8 @@ pub mod compiler;
 #[cfg(feature = "coord")]
 pub mod durable;
 pub mod master;
+#[cfg(feature = "coord")]
+pub mod mixed;
 pub mod provider;
 pub mod rea;
 pub mod runner;
@@ -43,11 +45,32 @@ pub enum GraphCommand {
     #[command(hide = true)]
     AuthorizeTool,
     #[cfg(feature = "coord")]
-    /// Submit an agent-only graph to the durable supervisor ledger.
+    /// Submit a graph to the existing durable supervisor ledger.
     Submit {
         /// Path to a graph JSON file.
         path: String,
+        /// Trust shell commands to run with daemon permissions (NO sandbox).
+        #[arg(long)]
+        allow_unsandboxed_shell: bool,
     },
+    #[cfg(feature = "coord")]
+    /// Record a human decision for one waiting node in an exact stored plan.
+    Decide {
+        graph_run_id: String,
+        node_id: String,
+        #[arg(long)]
+        digest: String,
+        /// Explicit decision: approve or reject. Actor is an assertion, not authentication.
+        #[arg(long, value_parser = ["approve", "reject"])]
+        decision: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        reason: String,
+    },
+    #[cfg(feature = "coord")]
+    /// Print the exact immutable execution snapshot covered by an approval digest.
+    Inspect { graph_run_id: String },
     #[cfg(feature = "coord")]
     /// Show durable supervisor state for one graph run.
     Status {
@@ -146,9 +169,13 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
             }
         }
         #[cfg(feature = "coord")]
-        GraphCommand::Submit { path } => {
+        GraphCommand::Submit {
+            path,
+            allow_unsandboxed_shell,
+        } => {
             let compiled = load_and_compile(path)?;
-            let submission = durable::submit(&compiled).map_err(io::Error::other)?;
+            let submission =
+                durable::submit(&compiled, *allow_unsandboxed_shell).map_err(io::Error::other)?;
             if json {
                 println!(
                     "{}",
@@ -159,10 +186,50 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
                 println!("Submitted durable graph run: {}", submission.graph_run_id);
                 println!("Graph: {}", submission.graph_id);
                 println!("Fingerprint: {}", submission.fingerprint);
+                println!("Approval digest: {}", submission.approval_digest);
                 for (node_id, task_id) in &submission.task_ids {
                     println!("  {node_id} -> {task_id}");
                 }
             }
+            Ok(())
+        }
+        #[cfg(feature = "coord")]
+        GraphCommand::Inspect { graph_run_id } => {
+            let conn = crate::coord::store::open().map_err(io::Error::other)?;
+            let (digest, snapshot) = mixed::snapshot(&conn, graph_run_id)
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("run has no snapshot (legacy or missing run)"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"digest": digest, "snapshot": snapshot})
+                )
+                .map_err(io::Error::other)?
+            );
+            Ok(())
+        }
+        #[cfg(feature = "coord")]
+        GraphCommand::Decide {
+            graph_run_id,
+            node_id,
+            digest,
+            decision,
+            actor,
+            reason,
+        } => {
+            mixed::decide(
+                graph_run_id,
+                node_id,
+                digest,
+                decision == "approve",
+                actor,
+                reason,
+            )
+            .map_err(io::Error::other)?;
+            println!(
+                "{}",
+                serde_json::json!({"graph_run_id": graph_run_id, "node_id": node_id, "decision": decision, "digest": digest})
+            );
             Ok(())
         }
         #[cfg(feature = "coord")]
@@ -175,6 +242,9 @@ pub fn dispatch(command: &GraphCommand, json: bool) -> io::Result<()> {
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 );
             } else {
+                if let Some(digest) = &status.approval_digest {
+                    println!("Approval digest: {digest}");
+                }
                 println!(
                     "Graph run {}: {} / {:?} ({})",
                     status.graph_run_id, status.effective_state, status.outcome, status.graph_id

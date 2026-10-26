@@ -39,14 +39,14 @@ fn iso_after_secs(secs_from_now: u64) -> String {
     )
 }
 
-/// Generate a simple unique ID: `{prefix}_{epoch_secs}_{counter}`.
+/// Process-scoped IDs also avoid collisions across short-lived CLI submissions.
 pub fn gen_id(prefix: &str) -> String {
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_nanos();
     let seq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}_{epoch}_{seq}")
+    format!("{prefix}_{epoch}_{}_{seq}", std::process::id())
 }
 
 /// Schema version the running binary expects to see in
@@ -69,7 +69,8 @@ pub fn gen_id(prefix: &str) -> String {
 /// v4 = durable graph-run identity on supervisor tasks.
 /// v5 = persisted task workspace path for isolated graph execution.
 /// v6 = per-attempt hook event cursor for race-free completion correlation.
-pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 6;
+/// v7 = mixed graph snapshots, evidence, and digest-bound approval decisions.
+pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 7;
 
 /// Open (or create) the coordination database and run migrations.
 pub fn open() -> Result<Connection, String> {
@@ -78,6 +79,7 @@ pub fn open() -> Result<Connection, String> {
         fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
     }
     let conn = Connection::open(&path).map_err(|e| format!("open db: {e}"))?;
+    check_schema_version(&conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("WAL mode: {e}"))?;
     conn.pragma_update(None, "foreign_keys", "ON")
@@ -114,6 +116,10 @@ pub fn check_schema_version(conn: &Connection) -> Result<(), String> {
 }
 
 fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Never stamp a future database back down to our version.
+    if check_schema_version(conn).is_err() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     conn.execute_batch(
         "
         -- Append-only event log
@@ -397,6 +403,26 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         "task_attempts",
         "hook_cursor",
         "hook_cursor INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS graph_snapshots (
+            run_id TEXT PRIMARY KEY REFERENCES graph_runs(id),
+            digest TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS graph_node_evidence (
+            attempt_id TEXT PRIMARY KEY REFERENCES task_attempts(id),
+            record_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS graph_approvals (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+            digest TEXT NOT NULL,
+            approved INTEGER NOT NULL CHECK (approved IN (0, 1)),
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            decided_at TEXT NOT NULL
+        );",
     )?;
 
     // Bump `user_version` last — table creation runs first so a partially
@@ -1496,6 +1522,11 @@ mod tests {
             err.contains("init --upgrade"),
             "error must point at the remediation: {err}"
         );
+        assert!(migrate(&conn).is_err());
+        let after: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, future, "migration must not downgrade a future DB");
     }
 
     #[test]

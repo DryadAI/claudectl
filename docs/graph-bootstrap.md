@@ -3,9 +3,9 @@
 The graph layer now has two execution paths over one canonical, framework-independent JSON IR:
 
 - **local seed/provider runtime** for deterministic commands, checks, approvals, and providers such as REA;
-- **durable supervisor runtime** for Claude Code agent DAGs that need dependency ordering, retries, verifier evidence, restart-safe state, and isolated workspaces.
+- **durable supervisor runtime** for agent, command/check, provider and approval DAGs with persisted dependency ordering, attempts and evidence.
 
-This is still a draft bootstrap. Mixed durable graphs, automatic integration/merge, graph timeouts, and cryptographic plan binding are not implemented yet.
+This is still a draft bootstrap. [Mixed durable graphs](druid-durable-mixed-graphs.md) now have SHA-256 run-bound approval snapshots. Automatic integration/merge, graph timeouts, signed approvals and repository-state attestation remain unimplemented.
 
 The [DRUID master planner](druid-master-plans.md) now compiles versioned lifecycle
 plans into this same IR, with requirements, SHA-256 content identity and evidence
@@ -71,7 +71,7 @@ When REA is installed, its full JSON result is streamed to a run artifact. Missi
 
 ## Durable supervisor contract
 
-`graph submit` is intentionally narrower than `graph run` in V1. It accepts only `agent` nodes using capability `agent.execute`, with provider omitted or set to `claude_code`.
+`graph submit` supports [mixed graphs](druid-durable-mixed-graphs.md) through the same supervisor. Agent nodes still require capability `agent.execute`, with provider omitted or set to `claude_code`. Non-agent shell execution requires explicit unsandboxed opt-in. Subgraphs and typed artifact transport are rejected.
 
 Submission is atomic:
 
@@ -171,7 +171,7 @@ Verifier behavior:
 
 ## Durable outcome mapping
 
-`graph status` maps supervisor state back into the graph outcome vocabulary:
+For agent tasks, `graph status` maps supervisor state back into the graph outcome vocabulary:
 
 - `DONE` -> `PASS`
 - `NEEDS_HUMAN` with a latest verifier `FAIL` -> `FAIL`
@@ -181,9 +181,14 @@ Verifier behavior:
 
 A durable graph run is `PASS` only when every node is `PASS`.
 
+For mixed non-agent nodes, persisted executor evidence supplies FAIL/ERROR/UNKNOWN
+outcomes; rejected approval is FAIL. AWAITING_APPROVAL is UNKNOWN and holds
+dependents without failure propagation. Cancellation remains ERROR even if late
+executor evidence reports PASS. See the [mixed-runtime contract](druid-durable-mixed-graphs.md).
+
 ## Evidence and plan binding
 
-The current graph fingerprint is deterministic FNV-1a and is useful for stale-plan/change detection only. It is **not** a cryptographic authorization digest.
+The canonical graph fingerprint is deterministic FNV-1a and is useful for stale-plan/change detection only. It is **not** an authorization digest. New durable runs additionally store a SHA-256 execution snapshot digest for explicit approval decisions; this is not a signature or repository-state attestation.
 
 Current durable evidence includes:
 
@@ -203,7 +208,7 @@ The most important remaining gaps are:
 
 1. **Durable environment integration remains unverified.** [PR #2 local validation](validation/druid-master-compiler-v1.md) covers formatting, check, clippy, tests and the local master-plan example; it does not exercise production agent launches or installed hooks.
 2. No automatic fan-in/integration/merge of independent worktrees.
-3. No mixed durable graph where deterministic/REA nodes and supervisor-backed agent nodes share one resumable execution state machine.
+3. Mixed execution is now persisted, but interrupted deterministic attempts remain UNKNOWN rather than being replayed. Durable-to-master report projection is not implemented.
 4. No enforced wall-clock cancellation/termination contract.
 5. No automatic worktree cleanup.
 6. No signed authorization binding execution to verified repository state. Master plans now have SHA-256 content identity over the authored graph, source claims and authority; the runtime does not attest those claims or enforce a signed approval digest.
