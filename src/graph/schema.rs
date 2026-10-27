@@ -94,6 +94,7 @@ pub enum NodeKind {
     Command,
     Check,
     Agent,
+    Integration,
     Tool,
     Approval,
     Subgraph,
@@ -114,6 +115,18 @@ pub enum ExecutorSpec {
         #[serde(default)]
         request: serde_json::Value,
     },
+    /// Copy declared outputs from completed direct agent dependencies into
+    /// this node's isolated worktree. Never commits or merges to the base repo.
+    ArtifactCollect { sources: Vec<ArtifactSourceSpec> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSourceSpec {
+    pub node: String,
+    pub path: String,
+    pub verified_by: String,
+    pub destination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

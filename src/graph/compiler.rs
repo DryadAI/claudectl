@@ -59,6 +59,39 @@ pub fn compile(spec: GraphSpec) -> Result<CompiledGraph, String> {
         deps.sort();
     }
 
+    for node in &spec.nodes {
+        if let Some(ExecutorSpec::ArtifactCollect { sources }) = &node.executor {
+            for source in sources {
+                let dependency = node_map
+                    .get(&source.node)
+                    .ok_or_else(|| format!("unknown artifact source node '{}'", source.node))?;
+                if dependency.kind != NodeKind::Agent
+                    || !dependencies[&node.id].contains(&source.node)
+                    || !dependency.artifact_paths.contains(&source.path)
+                {
+                    return Err(format!(
+                        "integration source '{}:{}' must be a declared artifact on a direct agent dependency",
+                        source.node, source.path
+                    ));
+                }
+                let verifier = node_map
+                    .get(&source.verified_by)
+                    .ok_or_else(|| format!("unknown artifact verifier '{}'", source.verified_by))?;
+                if verifier.kind != NodeKind::Check
+                    || verifier.workspace.mode != super::schema::WorkspaceMode::Worktree
+                    || !matches!(verifier.executor, Some(ExecutorSpec::Shell { .. }))
+                    || !dependencies[&source.verified_by].contains(&source.node)
+                    || !dependencies[&node.id].contains(&source.verified_by)
+                {
+                    return Err(format!(
+                        "integration source '{}:{}' requires its direct worktree verifier '{}' as a dependency",
+                        source.node, source.path, source.verified_by
+                    ));
+                }
+            }
+        }
+    }
+
     validate_acyclic(&dependencies)?;
 
     for node in &spec.nodes {
@@ -104,6 +137,14 @@ fn validate_node(node: &NodeSpec, spec: &GraphSpec) -> Result<(), String> {
             "node '{}' declares artifact paths but is not an agent",
             node.id
         ));
+    }
+    if node.kind == NodeKind::Integration {
+        if node.workspace.mode != super::schema::WorkspaceMode::Worktree {
+            return Err(format!(
+                "integration node '{}' must use an isolated worktree",
+                node.id
+            ));
+        }
     }
     let mut artifact_paths = std::collections::BTreeSet::new();
     for path in &node.artifact_paths {
@@ -165,11 +206,72 @@ fn validate_node(node: &NodeSpec, spec: &GraphSpec) -> Result<(), String> {
                     }
                     require_capability(node, capability)?;
                 }
+                ExecutorSpec::ArtifactCollect { sources } => {
+                    if node.kind != NodeKind::Integration || sources.is_empty() {
+                        return Err(
+                            "artifact collection requires an integration node with at least one source"
+                                .into(),
+                        );
+                    }
+                    let mut destinations = BTreeSet::new();
+                    for source in sources {
+                        super::schema::validate_artifact_path(&source.path)?;
+                        super::schema::validate_artifact_path(&source.destination)?;
+                        if source.node.trim().is_empty() {
+                            return Err("artifact source node must not be empty".into());
+                        }
+                        if !destinations.insert(&source.destination) {
+                            return Err(format!(
+                                "integration node '{}' has conflicting destination '{}'",
+                                node.id, source.destination
+                            ));
+                        }
+                        if !node
+                            .authority
+                            .filesystem_write
+                            .iter()
+                            .any(|scope| write_scope_covers(scope, &source.destination))
+                        {
+                            return Err(format!(
+                                "integration destination '{}' is outside declared filesystem_write authority",
+                                source.destination
+                            ));
+                        }
+                    }
+                    let ordered: Vec<_> = destinations.iter().copied().collect();
+                    for pair in ordered.windows(2) {
+                        if pair[1].starts_with(&format!("{}/", pair[0])) {
+                            return Err(format!(
+                                "integration destinations '{}' and '{}' overlap",
+                                pair[0], pair[1]
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
 
+    if node.kind == NodeKind::Integration
+        && !matches!(node.executor, Some(ExecutorSpec::ArtifactCollect { .. }))
+    {
+        return Err(format!(
+            "integration node '{}' must use artifact_collect executor",
+            node.id
+        ));
+    }
+
     Ok(())
+}
+
+fn write_scope_covers(scope: &str, destination: &str) -> bool {
+    let scope = scope.trim().trim_start_matches("./").replace('\\', "/");
+    let destination = destination.trim_start_matches("./");
+    scope == "**"
+        || destination == scope
+        || scope.strip_suffix("/**").is_some_and(|prefix| {
+            destination == prefix || destination.starts_with(&format!("{prefix}/"))
+        })
 }
 
 fn require_capability(node: &NodeSpec, capability: &str) -> Result<(), String> {
@@ -579,6 +681,95 @@ mod tests {
         };
         let err = compile(graph(vec![provider], vec![])).unwrap_err();
         assert!(err.contains("rea.binary.inspect"));
+    }
+
+    #[test]
+    fn artifact_integration_requires_declared_direct_agent_outputs_and_write_scope() {
+        let mut agent = shell_node("agent");
+        agent.kind = NodeKind::Agent;
+        agent.artifact_paths = vec!["src/api.rs".into()];
+        agent.requires = vec!["agent.execute".into()];
+        agent.executor = Some(ExecutorSpec::Provider {
+            capability: "agent.execute".into(),
+            provider: None,
+            request: serde_json::json!({"cwd":"/repo","prompt":"implement"}),
+        });
+
+        let mut integration = shell_node("integrate");
+        integration.kind = NodeKind::Integration;
+        integration.requires.clear();
+        integration.workspace.mode = super::super::schema::WorkspaceMode::Worktree;
+        integration.authority.filesystem_write = vec!["src/**".into()];
+        integration.executor = Some(ExecutorSpec::ArtifactCollect {
+            sources: vec![super::super::schema::ArtifactSourceSpec {
+                node: "agent".into(),
+                path: "src/api.rs".into(),
+                verified_by: "verify".into(),
+                destination: "src/api.rs".into(),
+            }],
+        });
+        let mut verifier = shell_node("verify");
+        verifier.kind = NodeKind::Check;
+        verifier.workspace.mode = super::super::schema::WorkspaceMode::Worktree;
+        let edge = EdgeSpec {
+            from: EdgeEndpoint {
+                node: "agent".into(),
+                port: None,
+            },
+            to: EdgeEndpoint {
+                node: "verify".into(),
+                port: None,
+            },
+            dependency_only: true,
+        };
+        let integration_edge = EdgeSpec {
+            from: EdgeEndpoint {
+                node: "agent".into(),
+                port: None,
+            },
+            to: EdgeEndpoint {
+                node: "integrate".into(),
+                port: None,
+            },
+            dependency_only: true,
+        };
+        let verifier_edge = EdgeSpec {
+            from: EdgeEndpoint {
+                node: "verify".into(),
+                port: None,
+            },
+            to: EdgeEndpoint {
+                node: "integrate".into(),
+                port: None,
+            },
+            dependency_only: true,
+        };
+        let nodes = vec![agent.clone(), verifier.clone(), integration.clone()];
+        let edges = vec![
+            edge.clone(),
+            integration_edge.clone(),
+            verifier_edge.clone(),
+        ];
+        assert!(compile(graph(nodes.clone(), edges.clone())).is_ok());
+
+        let err = compile(graph(nodes.clone(), vec![])).unwrap_err();
+        assert!(err.contains("direct agent dependency"));
+
+        let mut undeclared = integration.clone();
+        if let Some(ExecutorSpec::ArtifactCollect { sources }) = &mut undeclared.executor {
+            sources[0].path = "src/secret.txt".into();
+        }
+        let err = compile(graph(
+            vec![agent.clone(), verifier.clone(), undeclared],
+            edges.clone(),
+        ))
+        .unwrap_err();
+        assert!(err.contains("direct agent dependency"));
+
+        let mut out_of_scope = integration;
+        out_of_scope.authority.filesystem_write = vec!["docs/**".into()];
+        let err = compile(graph(vec![agent, verifier, out_of_scope], edges)).unwrap_err();
+        assert!(err.contains("outside declared filesystem_write"));
     }
 
     #[test]

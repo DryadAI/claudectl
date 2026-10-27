@@ -10,6 +10,7 @@ use crate::graph::{
     schema::GraphSpec,
 };
 use serde_json::{Value, json};
+use sha2::Digest;
 
 struct Quiet;
 impl Sensors for Quiet {
@@ -38,6 +39,26 @@ fn published_mixed_example_compiles_and_submits_without_executing() {
             .unwrap()
             .iter()
             .all(|t| t.state == TaskState::Pending)
+    );
+}
+
+#[test]
+fn published_integration_example_compiles_and_submits_without_execution() {
+    let graph = compiler::compile(
+        serde_json::from_str(include_str!(
+            "../../../examples/graph-durable-integration-smoke.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut conn = store::open_memory();
+    let submission = submit(&mut conn, &graph);
+    assert_eq!(submission.task_ids.len(), 4);
+    assert!(
+        tasks::list_tasks(&conn, None)
+            .unwrap()
+            .iter()
+            .all(|task| task.state == TaskState::Pending)
     );
 }
 
@@ -1354,6 +1375,187 @@ fn artifact_observer_hashes_files_and_rejects_missing_or_escaping_paths() {
             super::super::runner::ArtifactState::Unsafe
         );
     }
+}
+
+#[test]
+fn artifact_collector_is_scoped_idempotent_and_conflict_failing() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    std::fs::create_dir(source.path().join("src")).unwrap();
+    std::fs::write(source.path().join("src/api.rs"), "pub fn api() {}\n").unwrap();
+    let collection = super::ArtifactCollection {
+        inputs: vec![super::IntegrationInput {
+            source_root: source.path().to_path_buf(),
+            source_path: "src/api.rs".into(),
+            destination: "src/api.rs".into(),
+            verified_sha256: format!("sha256:{:x}", sha2::Sha256::digest(b"pub fn api() {}\n")),
+            verified_bytes: 16,
+            base_revision: None,
+        }],
+    };
+    let evidence = super::collect_artifacts(&collection, target.path()).unwrap();
+    assert!(evidence[0].contains("src/api.rs sha256:"));
+    assert_eq!(
+        std::fs::read_to_string(target.path().join("src/api.rs")).unwrap(),
+        "pub fn api() {}\n"
+    );
+    assert!(super::collect_artifacts(&collection, target.path()).is_ok());
+
+    std::fs::write(target.path().join("src/api.rs"), "destination conflict\n").unwrap();
+    let err = super::collect_artifacts(&collection, target.path()).unwrap_err();
+    assert!(err.contains("different content"));
+    std::fs::write(target.path().join("src/api.rs"), "pub fn api() {}\n").unwrap();
+
+    std::fs::write(source.path().join("src/api.rs"), "different\n").unwrap();
+    let err = super::collect_artifacts(&collection, target.path()).unwrap_err();
+    assert!(err.contains("changed after its verifier"));
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "not for collection").unwrap();
+        let link = source.path().join("src/link");
+        std::os::unix::fs::symlink(outside.path().join("secret"), &link).unwrap();
+        let unsafe_collection = super::ArtifactCollection {
+            inputs: vec![super::IntegrationInput {
+                source_root: source.path().to_path_buf(),
+                source_path: "src/link".into(),
+                destination: "src/link".into(),
+                verified_sha256: format!(
+                    "sha256:{:x}",
+                    sha2::Sha256::digest(b"not for collection")
+                ),
+                verified_bytes: 18,
+                base_revision: None,
+            }],
+        };
+        assert!(super::collect_artifacts(&unsafe_collection, target.path()).is_err());
+    }
+}
+
+#[test]
+fn durable_integration_waits_for_verifier_and_collects_into_an_isolated_worktree() {
+    let repo = tempfile::tempdir().unwrap();
+    let worktrees = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "DRUID test"]);
+    git(&["config", "user.email", "druid-test@example.invalid"]);
+    std::fs::write(repo.path().join("seed.txt"), "base").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "--quiet", "-m", "seed"]);
+
+    let graph: GraphSpec = serde_json::from_value(json!({
+        "version": 1,
+        "id": "integration-test",
+        "nodes": [
+            {
+                "id": "agent", "kind": "agent", "artifact_paths": ["src/result.txt"],
+                "requires": ["agent.execute"], "workspace": {"mode": "worktree"},
+                "executor": {"kind": "provider", "capability": "agent.execute", "request": {"cwd": repo.path(), "prompt": "not launched by test"}}
+            },
+            {
+                "id": "verify", "kind": "check", "requires": ["shell.execute"],
+                "workspace": {"mode": "worktree"},
+                "executor": {"kind": "shell", "command": "test -f src/result.txt"}
+            },
+            {
+                "id": "integrate", "kind": "integration", "workspace": {"mode": "worktree"},
+                "authority": {"filesystem_write": ["src/**"]},
+                "executor": {"kind": "artifact_collect", "sources": [{
+                    "node": "agent", "path": "src/result.txt", "verified_by": "verify", "destination": "src/result.txt"
+                }]}
+            }
+        ],
+        "edges": [
+            {"from": {"node": "agent"}, "to": {"node": "verify"}, "dependency_only": true},
+            {"from": {"node": "agent"}, "to": {"node": "integrate"}, "dependency_only": true},
+            {"from": {"node": "verify"}, "to": {"node": "integrate"}, "dependency_only": true}
+        ]
+    })).unwrap();
+    let compiled = compiler::compile(graph).unwrap();
+    let mut conn = store::open_memory();
+    let submission = submit(&mut conn, &compiled);
+    let agent_task = tasks::get_task(&conn, &submission.task_ids["agent"])
+        .unwrap()
+        .unwrap();
+    let agent_root =
+        crate::coord::workspace::prepare_task_workspace_at(&agent_task, worktrees.path()).unwrap();
+    std::fs::create_dir_all(agent_root.join("src")).unwrap();
+    std::fs::write(agent_root.join("src/result.txt"), "verified output").unwrap();
+    tasks::set_workspace_path(&conn, &agent_task.id, agent_root.to_str().unwrap()).unwrap();
+    tasks::transition(
+        &mut conn,
+        &agent_task.id,
+        TaskState::Pending,
+        TaskState::Done,
+        "test-agent-completed",
+    )
+    .unwrap();
+
+    let registry = ProviderRegistry::new();
+    let run_dir = tempfile::tempdir().unwrap();
+    let verify_attempt = tasks::attempt_count(&conn, &submission.task_ids["verify"]).unwrap() + 1;
+    super::execute_with_registry_at(
+        &mut conn,
+        &submission.task_ids["verify"],
+        verify_attempt,
+        &registry,
+        run_dir.path(),
+        Some(worktrees.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        tasks::get_task(&conn, &submission.task_ids["verify"])
+            .unwrap()
+            .unwrap()
+            .state,
+        TaskState::Done
+    );
+
+    let integrate_attempt =
+        tasks::attempt_count(&conn, &submission.task_ids["integrate"]).unwrap() + 1;
+    super::execute_with_registry_at(
+        &mut conn,
+        &submission.task_ids["integrate"],
+        integrate_attempt,
+        &registry,
+        run_dir.path(),
+        Some(worktrees.path()),
+    )
+    .unwrap();
+    let integrate_task = tasks::get_task(&conn, &submission.task_ids["integrate"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(integrate_task.state, TaskState::Done);
+    let integration_root =
+        crate::coord::workspace::existing_task_workspace_at(&integrate_task, worktrees.path())
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(integration_root.join("src/result.txt")).unwrap(),
+        "verified output"
+    );
+    assert!(!repo.path().join("src/result.txt").exists());
+
+    std::fs::remove_dir_all(worktrees.path()).unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["worktree", "prune"])
+        .output();
 }
 
 #[test]

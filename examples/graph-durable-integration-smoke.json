@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "id": "durable-artifact-integration-smoke-v1",
+  "goal": "Collect one independently verified agent artifact into a separate integration worktree; no merge or deployment.",
+  "nodes": [
+    {
+      "id": "agent-output",
+      "kind": "agent",
+      "artifact_paths": ["DRUID_INTEGRATION_SMOKE.txt"],
+      "requires": ["agent.execute"],
+      "workspace": {"mode": "worktree"},
+      "authority": {
+        "filesystem_read": ["./**"],
+        "filesystem_write": ["DRUID_INTEGRATION_SMOKE.txt"],
+        "git_commit": false,
+        "git_push": false
+      },
+      "executor": {
+        "kind": "provider",
+        "capability": "agent.execute",
+        "provider": "claude_code",
+        "request": {
+          "cwd": ".",
+          "prompt": "Create DRUID_INTEGRATION_SMOKE.txt containing 'verified integration input'. Do not use Bash, commit, push, deploy, or edit any other file."
+        }
+      }
+    },
+    {
+      "id": "verify-agent-output",
+      "kind": "check",
+      "requires": ["shell.execute"],
+      "workspace": {"mode": "worktree"},
+      "executor": {
+        "kind": "shell",
+        "command": "test \"$(cat DRUID_INTEGRATION_SMOKE.txt)\" = 'verified integration input'"
+      }
+    },
+    {
+      "id": "collect-output",
+      "kind": "integration",
+      "workspace": {"mode": "worktree"},
+      "authority": {"filesystem_write": ["reviewed/**"]},
+      "executor": {
+        "kind": "artifact_collect",
+        "sources": [
+          {
+            "node": "agent-output",
+            "path": "DRUID_INTEGRATION_SMOKE.txt",
+            "verified_by": "verify-agent-output",
+            "destination": "reviewed/DRUID_INTEGRATION_SMOKE.txt"
+          }
+        ]
+      }
+    },
+    {
+      "id": "verify-collected-output",
+      "kind": "check",
+      "requires": ["shell.execute"],
+      "workspace": {"mode": "worktree"},
+      "executor": {
+        "kind": "shell",
+        "command": "test \"$(cat reviewed/DRUID_INTEGRATION_SMOKE.txt)\" = 'verified integration input'"
+      }
+    }
+  ],
+  "edges": [
+    {"from": {"node": "agent-output"}, "to": {"node": "verify-agent-output"}, "dependency_only": true},
+    {"from": {"node": "agent-output"}, "to": {"node": "collect-output"}, "dependency_only": true},
+    {"from": {"node": "verify-agent-output"}, "to": {"node": "collect-output"}, "dependency_only": true},
+    {"from": {"node": "collect-output"}, "to": {"node": "verify-collected-output"}, "dependency_only": true}
+  ]
+}

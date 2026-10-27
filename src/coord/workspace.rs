@@ -13,17 +13,28 @@ enum WorkspaceMode {
 }
 
 pub fn prepare_task_workspace(task: &TaskRow) -> Result<PathBuf, String> {
+    prepare_task_workspace_at(task, &workspace_root())
+}
+
+pub(crate) fn prepare_task_workspace_at(
+    task: &TaskRow,
+    worktree_root: &Path,
+) -> Result<PathBuf, String> {
     let source = Path::new(&task.cwd)
         .canonicalize()
         .map_err(|e| format!("resolve task cwd '{}': {e}", task.cwd))?;
 
     match workspace_mode(task.policy.as_ref()) {
         WorkspaceMode::Shared => Ok(source),
-        WorkspaceMode::Worktree => prepare_worktree(task, &source),
+        WorkspaceMode::Worktree => prepare_worktree(task, &source, worktree_root),
     }
 }
 
-fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
+fn prepare_worktree(
+    task: &TaskRow,
+    source: &Path,
+    worktree_root: &Path,
+) -> Result<PathBuf, String> {
     if let Some(existing) = task.workspace_path.as_deref() {
         let path = PathBuf::from(existing);
         if path.is_dir() && is_git_worktree(&path) {
@@ -65,7 +76,7 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
         &canonical_repo_root,
         graph_run_id,
         graph_node_id,
-        &workspace_root(),
+        worktree_root,
     );
 
     // Crash-safe reuse: if the worktree already exists but workspace_path
