@@ -389,6 +389,13 @@ pub(crate) fn execute_once(
                 }),
             }
         }
+        Some(ExecutorSpec::ArtifactCollect { .. }) => Ok(unknown_evidence(
+            node,
+            attempt,
+            started_at_ms,
+            started.elapsed().as_millis(),
+            "artifact_collect requires the durable graph executor".into(),
+        )),
         None => Ok(EvidenceRecord {
             node_id: node.id.clone(),
             attempt,

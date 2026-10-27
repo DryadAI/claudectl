@@ -328,7 +328,7 @@ pub fn compile(mut source: MasterPlan) -> Result<CompiledMasterPlan, String> {
                     item.node
                 ));
             }
-            if node.kind == NodeKind::Agent
+            if matches!(node.kind, NodeKind::Agent | NodeKind::Integration)
                 && (!validated.dependencies[verifier].contains(&item.node)
                     || nodes[verifier.as_str()].workspace.mode
                         != super::schema::WorkspaceMode::Worktree)

@@ -181,6 +181,14 @@ check nodes linked to an agent must use `workspace.mode: worktree`, directly
 depend on that agent and execute in its recorded worktree. Their observed PASS
 is still required to mark the agent work verified.
 
+Verified outputs can be explicitly staged from multiple direct agent dependencies
+with an `integration` graph node. Each source must name its declared artifact,
+the matching verifier and a destination covered by the integration node's write
+authority. Collection occurs in a separate run-specific worktree, confirms the
+verifier-time hash and shared base revision, and never merges or mutates the base
+checkout. Downstream verification must validate the collected workspace; Git
+integration, commit, push and deployment remain separate human-controlled work.
+
 Items without `verify_with` can reach implemented, never verified. In particular,
 a check passing does not independently verify itself. Intended deliverables do
 not become evidence merely by being listed; file observations do not establish

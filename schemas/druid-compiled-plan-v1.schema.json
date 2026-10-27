@@ -30,6 +30,30 @@
     "execution"
   ],
   "$defs": {
+    "ArtifactSourceSpec": {
+      "type": "object",
+      "properties": {
+        "destination": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "verified_by": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "path",
+        "verified_by",
+        "destination"
+      ]
+    },
     "Authority": {
       "type": "object",
       "properties": {
@@ -189,6 +213,27 @@
             "kind",
             "capability"
           ]
+        },
+        {
+          "description": "Copy declared outputs from completed direct agent dependencies into\nthis node's isolated worktree. Never commits or merges to the base repo.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact_collect"
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactSourceSpec"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "sources"
+          ]
         }
       ]
     },
@@ -322,6 +367,7 @@
         "command",
         "check",
         "agent",
+        "integration",
         "tool",
         "approval",
         "subgraph"

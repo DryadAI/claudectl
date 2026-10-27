@@ -207,7 +207,10 @@ Current durable evidence includes:
 The most important remaining gaps are:
 
 1. **Durable environment integration remains unverified.** [PR #2 local validation](validation/druid-master-compiler-v1.md) covers formatting, check, clippy, tests and the local master-plan example; it does not exercise production agent launches or installed hooks.
-2. No automatic fan-in/integration/merge of independent worktrees.
+2. Verified artifact fan-in is supported through an explicit integration node
+   that stages declared files into a separate worktree. There is still no Git
+   merge/commit/push, line-level conflict resolution, or deployment from that
+   worktree; destination collisions fail closed.
 3. Mixed execution is persisted, but interrupted deterministic attempts remain UNKNOWN rather than being replayed. Master status can read a durable run with `--run` and now reports hashes for declared agent deliverables in the exact worktree; this does not attest author identity or export a synthetic local-runner report.
 4. No enforced wall-clock cancellation/termination contract.
 5. No automatic worktree cleanup.

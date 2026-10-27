@@ -12,11 +12,12 @@ use sha2::{Digest, Sha256};
 use super::compiler::CompiledGraph;
 use super::provider::ProviderRegistry;
 use super::runner::EvidenceRecord;
-use super::runner::{ArtifactAttestation, ArtifactState};
+use super::runner::{ArtifactAttestation, ArtifactState, EvidenceConfidence};
 use super::schema::{ExecutorSpec, NodeKind, NodeSpec, Outcome, RiskLevel, WorkspaceMode};
 use crate::coord::tasks::{self, TaskRow, TaskState};
 
 const ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const ARTIFACT_COLLECTION_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,20 +63,25 @@ pub(crate) fn prepare(
             return Err("durable subgraph execution is not supported".into());
         }
         if node.kind != NodeKind::Agent && node.workspace.mode != WorkspaceMode::Shared {
-            let agent_dependencies: Vec<_> = compiled.dependencies[&node.id]
+            let worktree_dependencies: Vec<_> = compiled.dependencies[&node.id]
                 .iter()
                 .filter(|dependency| {
                     compiled.spec.nodes.iter().any(|candidate| {
-                        candidate.id == **dependency && candidate.kind == NodeKind::Agent
+                        candidate.id == **dependency
+                            && matches!(candidate.kind, NodeKind::Agent | NodeKind::Integration)
                     })
                 })
                 .collect();
-            if node.kind != NodeKind::Check
-                || !matches!(node.executor, Some(ExecutorSpec::Shell { .. }))
-                || agent_dependencies.len() != 1
+            let integration = node.kind == NodeKind::Integration
+                && matches!(node.executor, Some(ExecutorSpec::ArtifactCollect { .. }));
+            if (!integration
+                && (node.kind != NodeKind::Check
+                    || !matches!(node.executor, Some(ExecutorSpec::Shell { .. }))
+                    || worktree_dependencies.len() != 1))
+                || (integration && worktree_dependencies.is_empty())
             {
                 return Err(format!(
-                    "worktree node '{}' must be a shell check with exactly one direct agent dependency",
+                    "worktree node '{}' must be an agent-dependent shell check or artifact integration",
                     node.id
                 ));
             }
@@ -101,6 +107,36 @@ pub(crate) fn prepare(
                         .ok_or("agent cwd missing")?,
                 )
                 .map_err(|e| format!("resolve agent cwd: {e}"))?;
+            }
+            NodeKind::Integration => {
+                let Some(ExecutorSpec::ArtifactCollect { sources }) = &node.executor else {
+                    return Err("integration node is missing artifact_collect executor".into());
+                };
+                let mut source_roots = Vec::new();
+                for source in sources {
+                    let agent = compiled
+                        .spec
+                        .nodes
+                        .iter()
+                        .find(|candidate| candidate.id == source.node)
+                        .ok_or("integration agent source is missing")?;
+                    let Some(ExecutorSpec::Provider { request, .. }) = &agent.executor else {
+                        return Err("integration source agent request is missing".into());
+                    };
+                    let source_root = std::fs::canonicalize(
+                        request
+                            .get("cwd")
+                            .and_then(|value| value.as_str())
+                            .ok_or("agent cwd missing")?,
+                    )
+                    .map_err(|error| format!("resolve integration source repository: {error}"))?;
+                    source_roots.push(source_root);
+                }
+                let first = source_roots.first().ok_or("integration has no sources")?;
+                if source_roots.iter().any(|root| root != first) {
+                    return Err("all integration agent sources must share one repository".into());
+                }
+                cwd.clone_from(first);
             }
             NodeKind::Approval => {
                 if node.executor.is_some() || node.requires.iter().any(|r| r != "human.approval") {
@@ -154,6 +190,9 @@ pub(crate) fn prepare(
                     {
                         return Err("durable provider target must be absolute".into());
                     }
+                }
+                Some(ExecutorSpec::ArtifactCollect { .. }) => {
+                    return Err("artifact_collect executor requires an integration node".into());
                 }
                 None => return Err(format!("node '{}' has no executor", node.id)),
             },
@@ -624,6 +663,7 @@ struct Claim {
     attempt: u32,
     fingerprint: String,
     artifact_source: Option<ArtifactSource>,
+    integration: Option<ArtifactCollection>,
 }
 
 struct ArtifactSource {
@@ -633,6 +673,20 @@ struct ArtifactSource {
     worktree_root: Option<PathBuf>,
 }
 
+struct IntegrationInput {
+    source_root: PathBuf,
+    source_path: String,
+    destination: String,
+    verified_sha256: String,
+    verified_bytes: u64,
+    base_revision: Option<String>,
+}
+
+struct ArtifactCollection {
+    inputs: Vec<IntegrationInput>,
+}
+
+#[cfg(test)]
 fn claim(
     conn: &mut Connection,
     task_id: &str,
@@ -665,6 +719,7 @@ fn claim_at(
             .ok_or("missing snapshot")?;
     let mut prepared = prepared;
     let mut artifact_source = None;
+    let mut integration = None;
     if prepared.node.kind == NodeKind::Check
         && prepared.node.workspace.mode == WorkspaceMode::Worktree
     {
@@ -680,14 +735,15 @@ fn claim_at(
         let agents: Vec<_> = dependencies
             .iter()
             .filter(|dependency| {
-                snapshot
-                    .nodes
-                    .get(*dependency)
-                    .is_some_and(|node| node.node.kind == NodeKind::Agent)
+                snapshot.nodes.get(*dependency).is_some_and(|node| {
+                    matches!(node.node.kind, NodeKind::Agent | NodeKind::Integration)
+                })
             })
             .collect();
         if agents.len() != 1 {
-            return Err("worktree check requires exactly one direct agent dependency".into());
+            return Err(
+                "worktree check requires exactly one direct agent or integration dependency".into(),
+            );
         }
         let agent_task_id = snapshot
             .task_ids
@@ -702,19 +758,94 @@ fn claim_at(
         let agent_node = snapshot
             .nodes
             .get(agents[0].as_str())
-            .ok_or("agent node missing")?;
-        let baseline =
-            observe_artifacts(&agent_task, &agent_node.node.artifact_paths, worktree_root);
-        artifact_source = Some(ArtifactSource {
-            task: agent_task,
-            paths: agent_node.node.artifact_paths.clone(),
-            baseline,
-            worktree_root: worktree_root.map(Path::to_path_buf),
-        });
+            .ok_or("source node missing")?;
+        if agent_node.node.kind == NodeKind::Agent {
+            let baseline =
+                observe_artifacts(&agent_task, &agent_node.node.artifact_paths, worktree_root);
+            artifact_source = Some(ArtifactSource {
+                task: agent_task.clone(),
+                paths: agent_node.node.artifact_paths.clone(),
+                baseline,
+                worktree_root: worktree_root.map(Path::to_path_buf),
+            });
+        }
         if let Some(ExecutorSpec::Shell { cwd, .. }) = &mut prepared.node.executor {
             *cwd = Some(workspace.to_string_lossy().into_owned());
         }
         prepared.cwd = workspace.to_string_lossy().into_owned();
+    }
+    if prepared.node.kind == NodeKind::Integration {
+        let Some(ExecutorSpec::ArtifactCollect { sources }) = &prepared.node.executor else {
+            return Err("integration node is missing artifact_collect executor".into());
+        };
+        let mut inputs = Vec::new();
+        for source in sources {
+            let source_task_id = snapshot
+                .task_ids
+                .get(&source.node)
+                .ok_or("integration source task identity missing")?;
+            let source_task =
+                tasks::get_task(&tx, source_task_id)?.ok_or("integration source task missing")?;
+            let source_root = match worktree_root {
+                Some(root) => {
+                    crate::coord::workspace::existing_task_workspace_at(&source_task, root)?
+                }
+                None => crate::coord::workspace::existing_task_workspace(&source_task)?,
+            }
+            .ok_or("integration source worktree is unavailable")?;
+            let verifier_task_id = snapshot
+                .task_ids
+                .get(&source.verified_by)
+                .ok_or("integration verifier task identity missing")?;
+            let verifier_task = tasks::get_task(&tx, verifier_task_id)?
+                .ok_or("integration verifier task missing")?;
+            let verifier_evidence = evidence(&tx, &verifier_task.id)?;
+            let verifier_node = snapshot
+                .nodes
+                .get(&source.verified_by)
+                .ok_or("integration verifier node missing")?;
+            let verifier_attempt = tasks::attempt_count(&tx, &verifier_task.id)?;
+            let expected_command = match verifier_node.node.executor.as_ref() {
+                Some(ExecutorSpec::Shell { command, .. }) => command,
+                _ => return Err("integration verifier is not a shell check".into()),
+            };
+            let attestation = verifier_evidence
+                .last()
+                .filter(|record| {
+                    record.outcome == Outcome::Pass
+                        && record.confidence == EvidenceConfidence::Observed
+                        && record.attempt == verifier_attempt
+                        && record.command.as_deref() == Some(expected_command.as_str())
+                        && record.exit_code == Some(0)
+                        && serde_json::to_value(&record.declared_authority).ok()
+                            == serde_json::to_value(&verifier_node.node.authority).ok()
+                })
+                .and_then(|record| {
+                    record
+                        .artifact_attestations
+                        .iter()
+                        .find(|item| item.path == source.path)
+                })
+                .filter(|item| item.state == ArtifactState::Present)
+                .ok_or("integration source lacks matching successful verifier evidence")?;
+            let verified_sha256 = attestation
+                .sha256
+                .clone()
+                .ok_or("verified artifact has no hash")?;
+            let verified_bytes = attestation
+                .bytes
+                .ok_or("verified artifact has no byte count")?;
+            let base_revision = Some(crate::coord::workspace::workspace_revision(&source_root)?);
+            inputs.push(IntegrationInput {
+                source_root,
+                source_path: source.path.clone(),
+                destination: source.destination.clone(),
+                verified_sha256,
+                verified_bytes,
+                base_revision,
+            });
+        }
+        integration = Some(ArtifactCollection { inputs });
     }
     if matches!(prepared.node.executor, Some(ExecutorSpec::Shell { .. }))
         && !snapshot.allow_unsandboxed_shell
@@ -744,6 +875,7 @@ fn claim_at(
         attempt,
         fingerprint,
         artifact_source,
+        integration,
     }))
 }
 
@@ -809,7 +941,19 @@ fn execute_with_registry(
     registry: &ProviderRegistry<'_>,
     base: &Path,
 ) -> Result<(), String> {
-    let Some(claim) = claim(conn, task_id, expected_attempt)? else {
+    execute_with_registry_at(conn, task_id, expected_attempt, registry, base, None)
+}
+
+fn execute_with_registry_at(
+    conn: &mut Connection,
+    task_id: &str,
+    expected_attempt: u32,
+    registry: &ProviderRegistry<'_>,
+    base: &Path,
+    worktree_root: Option<&Path>,
+) -> Result<(), String> {
+    prepare_integration_workspace(conn, task_id, worktree_root)?;
+    let Some(claim) = claim_at(conn, task_id, expected_attempt, worktree_root)? else {
         return Ok(());
     };
     // All path components are internal IDs, never user node labels.
@@ -819,14 +963,29 @@ fn execute_with_registry(
             "attempt claimed but evidence directory unavailable; execution remains UNKNOWN: {e}"
         )
     })?;
-    let mut record = super::runner::execute_once(
-        &claim.node,
-        &claim.fingerprint,
-        claim.attempt,
-        registry,
-        &run_dir,
-    )
-    .map_err(|e| format!("attempt result uncertain; no automatic replay: {e}"))?;
+    let mut record = if let Some(collection) = &claim.integration {
+        let target = match worktree_root {
+            Some(root) => crate::coord::workspace::existing_task_workspace_at(&claim.task, root)?,
+            None => crate::coord::workspace::existing_task_workspace(&claim.task)?,
+        }
+        .ok_or("integration worktree is unavailable")?;
+        let started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let started = std::time::Instant::now();
+        let result = collect_artifacts(collection, &target);
+        integration_evidence(&claim, result, started_at_ms, started.elapsed().as_millis())
+    } else {
+        super::runner::execute_once(
+            &claim.node,
+            &claim.fingerprint,
+            claim.attempt,
+            registry,
+            &run_dir,
+        )
+        .map_err(|e| format!("attempt result uncertain; no automatic replay: {e}"))?
+    };
     if let Some(source) = &claim.artifact_source {
         let after = observe_artifacts(&source.task, &source.paths, source.worktree_root.as_deref());
         let stable = source.baseline.iter().zip(&after).all(|(before, now)| {
@@ -842,6 +1001,262 @@ fn execute_with_registry(
         }
     }
     finish(conn, &claim, &record)
+}
+
+fn prepare_integration_workspace(
+    conn: &Connection,
+    task_id: &str,
+    worktree_root: Option<&Path>,
+) -> Result<(), String> {
+    let Some(task) = tasks::get_task(conn, task_id)? else {
+        return Err("task not found".into());
+    };
+    let Some(prepared) = prepared_task(conn, &task)? else {
+        return Ok(());
+    };
+    if prepared.node.kind != NodeKind::Integration
+        || !matches!(task.state, TaskState::Pending | TaskState::Retrying)
+        || !dependencies_done(conn, &task)?
+    {
+        return Ok(());
+    }
+    let workspace = match worktree_root {
+        Some(root) => crate::coord::workspace::prepare_task_workspace_at(&task, root)?,
+        None => crate::coord::workspace::prepare_task_workspace(&task)?,
+    };
+    let value = workspace.to_string_lossy().into_owned();
+    if task.workspace_path.as_deref() != Some(value.as_str()) {
+        tasks::set_workspace_path(conn, task_id, &value)?;
+    }
+    Ok(())
+}
+
+fn integration_evidence(
+    claim: &Claim,
+    result: Result<Vec<String>, String>,
+    started_at_ms: u128,
+    duration_ms: u128,
+) -> EvidenceRecord {
+    let (outcome, artifacts, message) = match result {
+        Ok(artifacts) => (
+            Outcome::Pass,
+            artifacts,
+            Some("declared artifacts collected into isolated integration worktree".into()),
+        ),
+        Err(error) => (Outcome::Fail, Vec::new(), Some(error)),
+    };
+    EvidenceRecord {
+        node_id: claim.node.id.clone(),
+        attempt: claim.attempt,
+        outcome,
+        confidence: EvidenceConfidence::Observed,
+        started_at_ms,
+        duration_ms,
+        declared_authority: claim.node.authority.clone(),
+        command: None,
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        message,
+        artifacts,
+        artifact_attestations: Vec::new(),
+    }
+}
+
+fn collect_artifacts(
+    collection: &ArtifactCollection,
+    target_root: &Path,
+) -> Result<Vec<String>, String> {
+    let mut outputs = Vec::new();
+    let mut total_bytes = 0u64;
+    for input in &collection.inputs {
+        let bytes = read_worktree_artifact(&input.source_root, &input.source_path)?;
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        if digest != input.verified_sha256 || bytes.len() as u64 != input.verified_bytes {
+            return Err(format!(
+                "verified source changed after its verifier: '{}:{}'",
+                input.source_root.display(),
+                input.source_path
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+        if total_bytes > ARTIFACT_COLLECTION_MAX_BYTES {
+            return Err(format!(
+                "integration artifact collection exceeds {} MiB",
+                ARTIFACT_COLLECTION_MAX_BYTES / (1024 * 1024)
+            ));
+        }
+        outputs.push((input.destination.clone(), bytes));
+    }
+    outputs.sort_by(|a, b| a.0.cmp(&b.0));
+    for pair in outputs.windows(2) {
+        if pair[1].0.starts_with(&format!("{}/", pair[0].0)) {
+            return Err(format!(
+                "overlapping integration destinations '{}' and '{}'",
+                pair[0].0, pair[1].0
+            ));
+        }
+    }
+    let root = target_root
+        .canonicalize()
+        .map_err(|e| format!("resolve integration worktree: {e}"))?;
+    if let Some(expected) = collection
+        .inputs
+        .iter()
+        .find_map(|input| input.base_revision.as_ref())
+    {
+        let target_revision = crate::coord::workspace::workspace_revision(&root)?;
+        if collection
+            .inputs
+            .iter()
+            .any(|input| input.base_revision.as_ref() != Some(&target_revision))
+        {
+            return Err(format!(
+                "integration and agent worktrees do not share the same base revision (expected {expected})"
+            ));
+        }
+    }
+    let mut evidence = Vec::new();
+    for (relative, bytes) in outputs {
+        super::schema::validate_artifact_path(&relative)?;
+        let mut parent = root.clone();
+        let components: Vec<_> = Path::new(&relative).components().collect();
+        for component in &components[..components.len().saturating_sub(1)] {
+            parent.push(component.as_os_str());
+            match fs::symlink_metadata(&parent) {
+                Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                    return Err(format!(
+                        "unsafe integration destination parent '{}'",
+                        parent.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::create_dir(&parent).map_err(|e| {
+                        format!("create integration directory '{}': {e}", parent.display())
+                    })?;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "inspect integration directory '{}': {error}",
+                        parent.display()
+                    ));
+                }
+            }
+        }
+        let destination = root.join(&relative);
+        match fs::symlink_metadata(&destination) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+                return Err(format!(
+                    "unsafe integration destination '{}'",
+                    destination.display()
+                ));
+            }
+            Ok(_) => {
+                let existing = read_bounded_file(&destination, ARTIFACT_MAX_BYTES)?;
+                if existing != bytes {
+                    return Err(format!(
+                        "integration destination already contains different content: '{relative}'"
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let temp = destination.with_file_name(format!(
+                    ".claudectl-stage-{}",
+                    crate::coord::store::gen_id("artifact")
+                ));
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temp)
+                    .map_err(|e| format!("stage integration artifact '{relative}': {e}"))?;
+                use std::io::Write;
+                if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+                    let _ = fs::remove_file(&temp);
+                    return Err(format!(
+                        "write staged integration artifact '{relative}': {error}"
+                    ));
+                }
+                drop(file);
+                let linked = fs::hard_link(&temp, &destination);
+                let _ = fs::remove_file(&temp);
+                linked.map_err(|e| {
+                    format!("publish integration artifact '{relative}' without overwrite: {e}")
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "inspect integration destination '{relative}': {error}"
+                ));
+            }
+        }
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        evidence.push(format!("{relative} {digest} ({} bytes)", bytes.len()));
+    }
+    Ok(evidence)
+}
+
+fn read_worktree_artifact(root: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    super::schema::validate_artifact_path(relative)?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("resolve source worktree: {e}"))?;
+    let mut current = root.clone();
+    let components: Vec<_> = Path::new(relative).components().collect();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|e| format!("inspect source artifact '{relative}': {e}"))?;
+        if metadata.file_type().is_symlink()
+            || if index + 1 == components.len() {
+                !metadata.is_file()
+            } else {
+                !metadata.is_dir()
+            }
+        {
+            return Err(format!(
+                "source artifact is not a regular in-worktree file: '{relative}'"
+            ));
+        }
+    }
+    let target = current
+        .canonicalize()
+        .map_err(|e| format!("resolve source artifact '{relative}': {e}"))?;
+    if !target.starts_with(&root) {
+        return Err(format!("source artifact escapes worktree: '{relative}'"));
+    }
+    let metadata =
+        fs::metadata(&target).map_err(|e| format!("stat source artifact '{relative}': {e}"))?;
+    if metadata.len() > ARTIFACT_MAX_BYTES {
+        return Err(format!(
+            "source artifact exceeds {} MiB: '{relative}'",
+            ARTIFACT_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = read_bounded_file(&target, ARTIFACT_MAX_BYTES)?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err(format!(
+            "source artifact changed while being read: '{relative}'"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let file =
+        File::open(path).map_err(|e| format!("open bounded file '{}': {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read bounded file '{}': {e}", path.display()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "file exceeds {} MiB: '{}'",
+            max_bytes / (1024 * 1024),
+            path.display()
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

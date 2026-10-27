@@ -11,6 +11,7 @@ agent artifact paths; old graph documents deserialize with an empty list.
 | Node | Execution | Boundary |
 | --- | --- | --- |
 | Agent | Existing Claude Code supervisor, worktree and verifier path | PR #1 authority restrictions remain |
+| Integration | Deterministic collection of explicitly declared, verifier-bound files | New isolated worktree; conflict-safe; never commits or merges to base |
 | Command/check/tool with shell | Existing local runner executor | Explicit `--allow-unsandboxed-shell` required |
 | Command/check/tool with provider | Existing provider registry (currently REA) | Missing capability/provider yields UNKNOWN |
 | Approval | Persisted human decision | Exact run/node/digest; no daemon stdin prompt |
@@ -32,6 +33,17 @@ appear in returned JSON and are not written to SQLite. Missing or unsafe paths
 keep agent work planned. Linked independent shell checks run inside the same
 worktree and must pass before the work becomes verified. This is file content
 evidence, not author identity or a signed attestation.
+
+An `integration` node may collect declared paths from direct agent dependencies.
+Each source names its artifact path and direct worktree shell verifier; the
+integration node must depend on both, and runtime hashes must still match the
+verifier's recorded manifest. The node writes only to its own worktree and only
+inside its declared `filesystem_write` scopes. Different base revisions,
+changed source content, symlinks, path traversal, destination conflicts and
+oversized collections fail closed. Retrying an already copied identical file is
+idempotent. This is an isolated staging/fan-in step, not Git merge, commit, push,
+or deployment. See [the integration smoke graph](../examples/graph-durable-integration-smoke.json);
+validate or plan it only unless a deliberately selected test daemon is in scope.
 
 ## Submission and approval
 
