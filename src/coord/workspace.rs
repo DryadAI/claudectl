@@ -61,13 +61,12 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    let target = workspace_root()
-        .join(format!(
-            "{:016x}",
-            fnv1a64(repo_root.to_string_lossy().as_bytes())
-        ))
-        .join(sanitize_component(graph_run_id))
-        .join(sanitize_component(graph_node_id));
+    let target = task_worktree_target_at(
+        &canonical_repo_root,
+        graph_run_id,
+        graph_node_id,
+        &workspace_root(),
+    );
 
     // Crash-safe reuse: if the worktree already exists but workspace_path
     // was not persisted before the process died, reuse it before consulting
@@ -137,6 +136,90 @@ fn prepare_worktree(task: &TaskRow, source: &Path) -> Result<PathBuf, String> {
     target
         .canonicalize()
         .map_err(|e| format!("resolve new worktree '{}': {e}", target.display()))
+}
+
+/// Resolve the already-created worktree for a durable agent without creating it.
+pub(crate) fn existing_task_workspace(task: &TaskRow) -> Result<Option<PathBuf>, String> {
+    existing_task_workspace_at(task, &workspace_root())
+}
+
+pub(crate) fn existing_task_workspace_at(
+    task: &TaskRow,
+    worktree_root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if workspace_mode(task.policy.as_ref()) != WorkspaceMode::Worktree {
+        return Ok(None);
+    }
+    let (Some(run_id), Some(node_id), Some(stored)) = (
+        task.graph_run_id.as_deref(),
+        task.graph_node_id.as_deref(),
+        task.workspace_path.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let source = Path::new(&task.cwd)
+        .canonicalize()
+        .map_err(|e| format!("resolve task cwd '{}': {e}", task.cwd))?;
+    let repo_root = PathBuf::from(git_stdout(&source, &["rev-parse", "--show-toplevel"])?.trim());
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|e| format!("resolve repository root: {e}"))?;
+    if source != repo_root {
+        return Err("durable agent cwd is not the repository root".into());
+    }
+    let expected = task_worktree_target_at(&repo_root, run_id, node_id, worktree_root);
+    let actual = PathBuf::from(stored)
+        .canonicalize()
+        .map_err(|e| format!("resolve recorded agent worktree: {e}"))?;
+    let expected = expected
+        .canonicalize()
+        .map_err(|e| format!("resolve expected agent worktree: {e}"))?;
+    if actual != expected || !is_git_worktree(&actual) {
+        return Err("recorded workspace is not this graph node's isolated Git worktree".into());
+    }
+    Ok(Some(actual))
+}
+
+#[cfg(test)]
+pub(crate) fn expected_task_workspace_at(
+    task: &TaskRow,
+    worktree_root: &Path,
+) -> Result<PathBuf, String> {
+    let repo_root = Path::new(&task.cwd)
+        .canonicalize()
+        .map_err(|e| format!("resolve task cwd '{}': {e}", task.cwd))?;
+    let git_root = PathBuf::from(git_stdout(&repo_root, &["rev-parse", "--show-toplevel"])?.trim())
+        .canonicalize()
+        .map_err(|e| format!("resolve repository root: {e}"))?;
+    if repo_root != git_root {
+        return Err("durable agent cwd is not the repository root".into());
+    }
+    let run_id = task.graph_run_id.as_deref().ok_or("missing graph run id")?;
+    let node_id = task
+        .graph_node_id
+        .as_deref()
+        .ok_or("missing graph node id")?;
+    Ok(task_worktree_target_at(
+        &repo_root,
+        run_id,
+        node_id,
+        worktree_root,
+    ))
+}
+
+fn task_worktree_target_at(
+    repo_root: &Path,
+    graph_run_id: &str,
+    graph_node_id: &str,
+    worktree_root: &Path,
+) -> PathBuf {
+    worktree_root
+        .join(format!(
+            "{:016x}",
+            fnv1a64(repo_root.to_string_lossy().as_bytes())
+        ))
+        .join(sanitize_component(graph_run_id))
+        .join(sanitize_component(graph_node_id))
 }
 
 pub fn workspace_revision(path: &Path) -> Result<String, String> {

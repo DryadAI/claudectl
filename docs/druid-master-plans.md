@@ -112,6 +112,11 @@ validation alone is not sufficient to accept a plan.
   requirement must map to work. Every graph node must map to exactly one work
   item with requirements and intended deliverables. Artifact names are labels;
   they are never treated as filesystem paths to open or write by the compiler.
+- Agent work items additionally declare portable relative `artifact_paths` in
+  their isolated worktree. The compiler copies these into the canonical graph
+  IR so the durable run snapshot binds the paths. Each observed file must be a
+  regular file no larger than 64 MiB. Missing, unreadable, directory, symlink,
+  absolute or escaping paths remain blockers.
 - All ten phases must be represented. Each item needs an upstream prerequisite:
   discovery → inventory → architecture → dependencies → specification →
   implementation → verification → approval. Deployment and recovery each follow
@@ -168,17 +173,28 @@ command, zero exit status and declared authority.
 | `implemented` | Final attempted execution has observed PASS |
 | `verified` | Item has observed PASS and every explicitly linked independent verifier has observed PASS |
 
+For agent work, every declared artifact path must also be present in that exact
+task's isolated worktree. Durable status emits a timestamped manifest with the
+relative path, byte length and SHA-256 for each observation. Unsafe or missing
+files keep the node planned and add a deliverable blocker. Independent shell
+check nodes linked to an agent must use `workspace.mode: worktree`, directly
+depend on that agent and execute in its recorded worktree. Their observed PASS
+is still required to mark the agent work verified.
+
 Items without `verify_with` can reach implemented, never verified. In particular,
 a check passing does not independently verify itself. Intended deliverables do
-not become evidence merely by being listed. Runtime `PASS/FAIL/UNKNOWN/ERROR`
-remains a separate field so failures are visible even when state remains planned.
+not become evidence merely by being listed; file observations do not establish
+who created the files. Runtime `PASS/FAIL/UNKNOWN/ERROR` remains a separate field
+so failures are visible even when state remains planned.
 
 Each item includes JSON pointers into the supplied report's evidence arrays,
-including its verifier evidence, and the report's `run_dir`. Those records contain
-commands, output, timestamps, authority and provider artifact links. The status
-command does not dereference arbitrary artifact locations, authenticate their
-contents, combine evidence from multiple runs, or silently promote inferred
-results. It lists unmet prerequisite/verifier IDs for follow-up.
+including its verifier evidence, and the report's `run_dir`. Durable status
+embeds its run-bound artifact observations. Save the returned JSON to retain an
+immutable copy; the command stays read-only and does not write the manifest into
+SQLite. It dereferences only validated relative paths within the run-specific
+worktree, does not authenticate authorship, combine evidence from multiple runs
+or promote inferred results, and lists unmet prerequisite, verifier and artifact
+blockers.
 
 ## Authority and execution limits
 

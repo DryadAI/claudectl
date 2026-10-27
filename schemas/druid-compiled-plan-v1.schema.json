@@ -330,6 +330,14 @@
     "NodeSpec": {
       "type": "object",
       "properties": {
+        "artifact_paths": {
+          "description": "Relative regular files that an agent must leave in its isolated worktree.\nThe durable master-plan status command observes and hashes these files.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "authority": {
           "$ref": "#/$defs/Authority",
           "default": {
@@ -507,6 +515,14 @@
     "WorkItem": {
       "type": "object",
       "properties": {
+        "artifact_paths": {
+          "description": "Relative paths in an agent's isolated worktree that must exist before\nthe work item can be marked implemented.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "deliverables": {
           "description": "Intended artifacts; listing one here is never evidence of its existence.",
           "type": "array",

@@ -1,6 +1,8 @@
 //! Durable non-agent nodes use supervisor tasks, never a second scheduler.
 //! Claim before execution; a missing result is uncertain, never replayable.
 use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -10,8 +12,11 @@ use sha2::{Digest, Sha256};
 use super::compiler::CompiledGraph;
 use super::provider::ProviderRegistry;
 use super::runner::EvidenceRecord;
+use super::runner::{ArtifactAttestation, ArtifactState};
 use super::schema::{ExecutorSpec, NodeKind, NodeSpec, Outcome, RiskLevel, WorkspaceMode};
 use crate::coord::tasks::{self, TaskRow, TaskState};
+
+const ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,10 +62,23 @@ pub(crate) fn prepare(
             return Err("durable subgraph execution is not supported".into());
         }
         if node.kind != NodeKind::Agent && node.workspace.mode != WorkspaceMode::Shared {
-            return Err(format!(
-                "non-agent node '{}' requires shared workspace; worktree handoff is not supported",
-                node.id
-            ));
+            let agent_dependencies: Vec<_> = compiled.dependencies[&node.id]
+                .iter()
+                .filter(|dependency| {
+                    compiled.spec.nodes.iter().any(|candidate| {
+                        candidate.id == **dependency && candidate.kind == NodeKind::Agent
+                    })
+                })
+                .collect();
+            if node.kind != NodeKind::Check
+                || !matches!(node.executor, Some(ExecutorSpec::Shell { .. }))
+                || agent_dependencies.len() != 1
+            {
+                return Err(format!(
+                    "worktree node '{}' must be a shell check with exactly one direct agent dependency",
+                    node.id
+                ));
+            }
         }
         if node.kind != NodeKind::Approval
             && matches!(node.risk, RiskLevel::Recoverable | RiskLevel::Irreversible)
@@ -297,6 +315,113 @@ pub(crate) fn validate_run_graph(
     Ok(digest)
 }
 
+/// Observe declared files only inside the exact durable agent worktree.
+/// Missing or unsafe artifacts are evidence states, not status command errors.
+pub(crate) fn observe_artifacts(
+    task: &TaskRow,
+    paths: &[String],
+    worktree_root: Option<&Path>,
+) -> Vec<ArtifactAttestation> {
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let root = match worktree_root {
+        Some(root) => crate::coord::workspace::existing_task_workspace_at(task, root),
+        None => crate::coord::workspace::existing_task_workspace(task),
+    }
+    .ok()
+    .flatten();
+    paths
+        .iter()
+        .map(|path| observe_artifact(root.as_deref(), path, observed_at_ms))
+        .collect()
+}
+
+fn observe_artifact(root: Option<&Path>, path: &str, observed_at_ms: u128) -> ArtifactAttestation {
+    let mut record = ArtifactAttestation {
+        path: path.to_owned(),
+        state: ArtifactState::Unavailable,
+        sha256: None,
+        bytes: None,
+        observed_at_ms,
+    };
+    let Some(root) = root else {
+        return record;
+    };
+    if super::schema::validate_artifact_path(path).is_err() {
+        record.state = ArtifactState::Unsafe;
+        return record;
+    }
+    let Ok(root) = root.canonicalize() else {
+        return record;
+    };
+    let target = root.join(path);
+    let mut current = root.clone();
+    let components: Vec<_> = Path::new(path).components().collect();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
+            record.state = ArtifactState::Missing;
+            return record;
+        };
+        if metadata.file_type().is_symlink()
+            || if index + 1 == components.len() {
+                !metadata.is_file()
+            } else {
+                !metadata.is_dir()
+            }
+        {
+            record.state = ArtifactState::Unsafe;
+            return record;
+        }
+    }
+    let Ok(canonical_target) = target.canonicalize() else {
+        record.state = ArtifactState::Missing;
+        return record;
+    };
+    if !canonical_target.starts_with(&root) {
+        record.state = ArtifactState::Unsafe;
+        return record;
+    }
+    let Ok(metadata) = fs::metadata(&canonical_target) else {
+        record.state = ArtifactState::Missing;
+        return record;
+    };
+    if metadata.len() > ARTIFACT_MAX_BYTES {
+        record.state = ArtifactState::TooLarge;
+        record.bytes = Some(metadata.len());
+        return record;
+    }
+    let Ok(mut file) = File::open(&canonical_target) else {
+        record.state = ArtifactState::Unavailable;
+        return record;
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    let mut total = 0u64;
+    loop {
+        let Ok(read) = file.read(&mut buffer) else {
+            record.state = ArtifactState::Unavailable;
+            return record;
+        };
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > ARTIFACT_MAX_BYTES {
+            record.state = ArtifactState::TooLarge;
+            record.bytes = Some(total);
+            return record;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    record.state = ArtifactState::Present;
+    record.sha256 = Some(format!("sha256:{:x}", hasher.finalize()));
+    record.bytes = Some(total);
+    record
+}
+
 pub(crate) fn dependencies_done(conn: &Connection, task: &TaskRow) -> Result<bool, String> {
     for id in &task.depends_on {
         if !tasks::get_task(conn, id)?.is_some_and(|t| t.state == TaskState::Done) {
@@ -498,12 +623,29 @@ struct Claim {
     attempt_id: String,
     attempt: u32,
     fingerprint: String,
+    artifact_source: Option<ArtifactSource>,
+}
+
+struct ArtifactSource {
+    task: TaskRow,
+    paths: Vec<String>,
+    baseline: Vec<ArtifactAttestation>,
+    worktree_root: Option<PathBuf>,
 }
 
 fn claim(
     conn: &mut Connection,
     task_id: &str,
     expected_attempt: u32,
+) -> Result<Option<Claim>, String> {
+    claim_at(conn, task_id, expected_attempt, None)
+}
+
+fn claim_at(
+    conn: &mut Connection,
+    task_id: &str,
+    expected_attempt: u32,
+    worktree_root: Option<&Path>,
 ) -> Result<Option<Claim>, String> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -521,6 +663,59 @@ fn claim(
     let (fingerprint, snapshot) =
         snapshot(&tx, task.graph_run_id.as_deref().ok_or("missing run")?)?
             .ok_or("missing snapshot")?;
+    let mut prepared = prepared;
+    let mut artifact_source = None;
+    if prepared.node.kind == NodeKind::Check
+        && prepared.node.workspace.mode == WorkspaceMode::Worktree
+    {
+        let dependencies = snapshot
+            .compiled
+            .dependencies
+            .get(
+                task.graph_node_id
+                    .as_deref()
+                    .ok_or("check node identity missing")?,
+            )
+            .ok_or("check node missing from snapshot")?;
+        let agents: Vec<_> = dependencies
+            .iter()
+            .filter(|dependency| {
+                snapshot
+                    .nodes
+                    .get(*dependency)
+                    .is_some_and(|node| node.node.kind == NodeKind::Agent)
+            })
+            .collect();
+        if agents.len() != 1 {
+            return Err("worktree check requires exactly one direct agent dependency".into());
+        }
+        let agent_task_id = snapshot
+            .task_ids
+            .get(agents[0].as_str())
+            .ok_or("agent task identity missing")?;
+        let agent_task = tasks::get_task(&tx, agent_task_id)?.ok_or("agent task missing")?;
+        let workspace = match worktree_root {
+            Some(root) => crate::coord::workspace::existing_task_workspace_at(&agent_task, root)?,
+            None => crate::coord::workspace::existing_task_workspace(&agent_task)?,
+        }
+        .ok_or("agent worktree is unavailable")?;
+        let agent_node = snapshot
+            .nodes
+            .get(agents[0].as_str())
+            .ok_or("agent node missing")?;
+        let baseline =
+            observe_artifacts(&agent_task, &agent_node.node.artifact_paths, worktree_root);
+        artifact_source = Some(ArtifactSource {
+            task: agent_task,
+            paths: agent_node.node.artifact_paths.clone(),
+            baseline,
+            worktree_root: worktree_root.map(Path::to_path_buf),
+        });
+        if let Some(ExecutorSpec::Shell { cwd, .. }) = &mut prepared.node.executor {
+            *cwd = Some(workspace.to_string_lossy().into_owned());
+        }
+        prepared.cwd = workspace.to_string_lossy().into_owned();
+    }
     if matches!(prepared.node.executor, Some(ExecutorSpec::Shell { .. }))
         && !snapshot.allow_unsandboxed_shell
     {
@@ -548,6 +743,7 @@ fn claim(
         attempt_id,
         attempt,
         fingerprint,
+        artifact_source,
     }))
 }
 
@@ -623,7 +819,7 @@ fn execute_with_registry(
             "attempt claimed but evidence directory unavailable; execution remains UNKNOWN: {e}"
         )
     })?;
-    let record = super::runner::execute_once(
+    let mut record = super::runner::execute_once(
         &claim.node,
         &claim.fingerprint,
         claim.attempt,
@@ -631,6 +827,20 @@ fn execute_with_registry(
         &run_dir,
     )
     .map_err(|e| format!("attempt result uncertain; no automatic replay: {e}"))?;
+    if let Some(source) = &claim.artifact_source {
+        let after = observe_artifacts(&source.task, &source.paths, source.worktree_root.as_deref());
+        let stable = source.baseline.iter().zip(&after).all(|(before, now)| {
+            before.path == now.path
+                && before.state == now.state
+                && before.sha256 == now.sha256
+                && before.bytes == now.bytes
+        });
+        record.artifact_attestations = after;
+        if record.outcome == super::schema::Outcome::Pass && !stable {
+            record.outcome = super::schema::Outcome::Fail;
+            record.message = Some("declared artifact changed while verifier ran".into());
+        }
+    }
     finish(conn, &claim, &record)
 }
 

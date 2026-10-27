@@ -1,4 +1,24 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Component, Path};
+
+pub fn validate_artifact_path(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.contains(['\\', ':']) {
+        return Err(format!(
+            "artifact path must be a nonempty portable relative path: {value:?}"
+        ));
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "artifact path must not escape its worktree: {value:?}"
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +64,10 @@ const fn default_max_attempts_per_node() -> u32 {
 pub struct NodeSpec {
     pub id: String,
     pub kind: NodeKind,
+    /// Relative regular files that an agent must leave in its isolated worktree.
+    /// The durable master-plan status command observes and hashes these files.
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]

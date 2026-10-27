@@ -472,6 +472,7 @@ mod tests {
         NodeSpec {
             id: id.into(),
             kind: NodeKind::Agent,
+            artifact_paths: vec![],
             description: None,
             requires: vec![AGENT_EXECUTE_CAPABILITY.into()],
             authority: Authority::default(),

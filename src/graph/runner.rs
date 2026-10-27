@@ -39,6 +39,28 @@ pub struct EvidenceRecord {
     pub message: Option<String>,
     #[serde(default)]
     pub artifacts: Vec<String>,
+    /// Read-time manifest bound to an independent worktree verifier.
+    #[serde(default)]
+    pub artifact_attestations: Vec<ArtifactAttestation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactAttestation {
+    pub path: String,
+    pub state: ArtifactState,
+    pub sha256: Option<String>,
+    pub bytes: Option<u64>,
+    pub observed_at_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactState {
+    Present,
+    Missing,
+    Unsafe,
+    TooLarge,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +138,7 @@ fn run_with_registry(
                         "not executed because dependency '{blocker}' did not PASS"
                     )),
                     artifacts: Vec::new(),
+                    artifact_attestations: Vec::new(),
                 };
                 append_evidence(&evidence_path, &evidence)?;
                 results.insert(
@@ -233,6 +256,7 @@ pub(crate) fn execute_once(
                 format!("human rejected exact plan {fingerprint}")
             }),
             artifacts: Vec::new(),
+            artifact_attestations: Vec::new(),
         });
     }
 
@@ -277,6 +301,7 @@ pub(crate) fn execute_once(
                         stderr: Some(truncate_output(&String::from_utf8_lossy(&output.stderr))),
                         message: None,
                         artifacts: Vec::new(),
+                        artifact_attestations: Vec::new(),
                     })
                 }
                 Err(err) => Ok(EvidenceRecord {
@@ -293,6 +318,7 @@ pub(crate) fn execute_once(
                     stderr: None,
                     message: Some(format!("failed to start shell command: {err}")),
                     artifacts: Vec::new(),
+                    artifact_attestations: Vec::new(),
                 }),
             }
         }
@@ -340,6 +366,7 @@ pub(crate) fn execute_once(
                     stderr: result.stderr.map(|output| truncate_output(&output)),
                     message: result.message,
                     artifacts: result.artifacts,
+                    artifact_attestations: Vec::new(),
                 }),
                 Err(err) => Ok(EvidenceRecord {
                     node_id: node.id.clone(),
@@ -358,6 +385,7 @@ pub(crate) fn execute_once(
                         runtime_provider.name()
                     )),
                     artifacts: Vec::new(),
+                    artifact_attestations: Vec::new(),
                 }),
             }
         }
@@ -375,6 +403,7 @@ pub(crate) fn execute_once(
             stderr: None,
             message: Some("node has no executable provider".into()),
             artifacts: Vec::new(),
+            artifact_attestations: Vec::new(),
         }),
     }
 }
@@ -400,6 +429,7 @@ fn unknown_evidence(
         stderr: None,
         message: Some(message),
         artifacts: Vec::new(),
+        artifact_attestations: Vec::new(),
     }
 }
 
@@ -489,6 +519,7 @@ mod tests {
             nodes: vec![NodeSpec {
                 id: "inspect".into(),
                 kind: NodeKind::Tool,
+                artifact_paths: vec![],
                 description: None,
                 requires: vec!["rea.binary.inspect".into()],
                 authority: Authority::default(),
@@ -566,6 +597,7 @@ mod tests {
             nodes: vec![NodeSpec {
                 id: "fail".into(),
                 kind: NodeKind::Check,
+                artifact_paths: vec![],
                 description: None,
                 requires: vec!["shell.execute".into()],
                 authority: Authority::default(),
@@ -598,6 +630,7 @@ mod tests {
         graph.spec.nodes.push(NodeSpec {
             id: "after".into(),
             kind: NodeKind::Tool,
+            artifact_paths: vec![],
             description: None,
             requires: vec!["other".into()],
             authority: Authority::default(),

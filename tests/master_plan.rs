@@ -3,7 +3,9 @@ use std::process::{Command, Stdio};
 
 use claudectl::graph::master::{self, CompiledMasterPlan, MasterPlan, Phase, WorkState};
 use claudectl::graph::runner::{EvidenceConfidence, EvidenceRecord, NodeExecution, RunReport};
-use claudectl::graph::schema::{EdgeEndpoint, EdgeSpec, ExecutorSpec, NetworkAuthority, Outcome};
+use claudectl::graph::schema::{
+    EdgeEndpoint, EdgeSpec, ExecutorSpec, NetworkAuthority, NodeKind, Outcome, WorkspaceMode,
+};
 
 fn example() -> MasterPlan {
     serde_json::from_str(include_str!("../examples/druid-master-plan-v1.json")).unwrap()
@@ -80,6 +82,7 @@ fn observed_report(bundle: &CompiledMasterPlan) -> RunReport {
                             stderr: None,
                             message: None,
                             artifacts: vec![],
+                            artifact_attestations: vec![],
                         }],
                     },
                 )
@@ -177,6 +180,50 @@ fn rejects_traceability_gaps_and_duplicates() {
             _ => source.work[1].phase = Phase::Discovery,
         }
         assert!(master::compile(source).is_err(), "case {change}");
+    }
+}
+
+#[test]
+fn agent_artifact_paths_lower_into_the_canonical_graph_and_reject_escape_paths() {
+    let mut source = example();
+    let node = source
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "implementation")
+        .unwrap();
+    node.kind = NodeKind::Agent;
+    node.requires = vec!["agent.execute".into()];
+    node.workspace.mode = WorkspaceMode::Worktree;
+    node.executor = Some(ExecutorSpec::Provider {
+        capability: "agent.execute".into(),
+        provider: None,
+        request: serde_json::json!({"cwd":".","prompt":"implement scoped changes"}),
+    });
+    source
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "verification")
+        .unwrap()
+        .workspace
+        .mode = WorkspaceMode::Worktree;
+    source.work[5].artifact_paths = vec!["src/feature.rs".into(), "docs/feature.md".into()];
+    let compiled = master::compile(source.clone()).unwrap();
+    let node = compiled
+        .execution
+        .spec
+        .nodes
+        .iter()
+        .find(|node| node.id == "implementation")
+        .unwrap();
+    assert_eq!(node.artifact_paths, source.work[5].artifact_paths);
+    master::validate_bundle(&compiled).unwrap();
+
+    for path in ["../outside", "/etc/passwd", "src\\outside", "."] {
+        let mut invalid = source.clone();
+        invalid.work[5].artifact_paths = vec![path.into()];
+        assert!(master::compile(invalid).is_err(), "accepted {path:?}");
     }
 }
 
