@@ -99,6 +99,19 @@ fn validate_node(node: &NodeSpec, spec: &GraphSpec) -> Result<(), String> {
             node.id, node.retry.max_attempts, spec.policy.max_attempts_per_node
         ));
     }
+    if !node.artifact_paths.is_empty() && node.kind != NodeKind::Agent {
+        return Err(format!(
+            "node '{}' declares artifact paths but is not an agent",
+            node.id
+        ));
+    }
+    let mut artifact_paths = std::collections::BTreeSet::new();
+    for path in &node.artifact_paths {
+        super::schema::validate_artifact_path(path)?;
+        if !artifact_paths.insert(path) {
+            return Err(format!("node '{}' repeats artifact path '{path}'", node.id));
+        }
+    }
 
     if node.authority.network == NetworkAuthority::Allowed && !spec.policy.allow_network {
         return Err(format!(
@@ -396,6 +409,7 @@ mod tests {
         NodeSpec {
             id: id.into(),
             kind: NodeKind::Command,
+            artifact_paths: vec![],
             description: None,
             requires: vec!["shell.execute".into()],
             authority: Authority::default(),
@@ -513,6 +527,7 @@ mod tests {
         let approval = NodeSpec {
             id: "approve".into(),
             kind: NodeKind::Approval,
+            artifact_paths: vec![],
             description: None,
             requires: vec!["human.approval".into()],
             authority: Authority::default(),
@@ -547,6 +562,7 @@ mod tests {
         let provider = NodeSpec {
             id: "inspect".into(),
             kind: NodeKind::Tool,
+            artifact_paths: vec![],
             description: None,
             requires: vec![],
             authority: Authority::default(),

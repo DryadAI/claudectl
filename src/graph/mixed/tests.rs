@@ -1061,6 +1061,20 @@ fn durable_projection_keeps_agent_done_distinct_from_verified_deliverable() {
         provider: None,
         request: json!({"cwd":".","prompt":"test only; no real launch"}),
     });
+    source
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "verification")
+        .unwrap()
+        .workspace
+        .mode = WorkspaceMode::Worktree;
+    source
+        .work
+        .iter_mut()
+        .find(|item| item.node == "implementation")
+        .unwrap()
+        .artifact_paths = vec!["README.md".into()];
     let bundle = super::super::master::compile(source).unwrap();
     let mut conn = store::open_memory();
     let r = submit(&mut conn, &bundle.execution);
@@ -1076,17 +1090,19 @@ fn durable_projection_keeps_agent_done_distinct_from_verified_deliverable() {
                     "test-agent-done",
                 )
                 .unwrap();
-            } else if matches!(
-                bundle
-                    .execution
-                    .spec
-                    .nodes
-                    .iter()
-                    .find(|n| &n.id == id)
-                    .unwrap()
-                    .executor,
-                Some(ExecutorSpec::Shell { .. })
-            ) {
+            } else if id != "verification"
+                && matches!(
+                    bundle
+                        .execution
+                        .spec
+                        .nodes
+                        .iter()
+                        .find(|n| &n.id == id)
+                        .unwrap()
+                        .executor,
+                    Some(ExecutorSpec::Shell { .. })
+                )
+            {
                 run(&mut conn, &r.task_ids[id], base.path());
             }
         }
@@ -1098,7 +1114,246 @@ fn durable_projection_keeps_agent_done_distinct_from_verified_deliverable() {
         status.plan.work["implementation"].state,
         super::super::master::WorkState::Planned
     );
-    assert!(!status.plan.work["implementation"].evidence.is_empty()); // Verifier link, not proof of the deliverable.
+    assert_eq!(
+        status.plan.work["implementation"].deliverable_evidence[0].state,
+        super::super::runner::ArtifactState::Unavailable
+    );
+}
+
+#[test]
+fn durable_projection_attests_agent_artifacts_in_its_run_worktree() {
+    use super::super::master::{WorkState, status_from_durable_at};
+    let repo = tempfile::tempdir().unwrap();
+    let worktrees = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "DRUID test"]);
+    git(&["config", "user.email", "druid-test@example.invalid"]);
+    std::fs::write(repo.path().join("seed.txt"), "seed").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "--quiet", "-m", "seed"]);
+
+    let mut source = master_fixture().source;
+    let agent = source
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "implementation")
+        .unwrap();
+    agent.kind = NodeKind::Agent;
+    agent.requires = vec!["agent.execute".into()];
+    agent.workspace.mode = WorkspaceMode::Worktree;
+    agent.executor = Some(ExecutorSpec::Provider {
+        capability: "agent.execute".into(),
+        provider: None,
+        request: json!({"cwd":repo.path(),"prompt":"test fixture; no launch"}),
+    });
+    let verifier = source
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "verification")
+        .unwrap();
+    verifier.workspace.mode = WorkspaceMode::Worktree;
+    verifier.executor = Some(ExecutorSpec::Shell {
+        command: "test -f src/result.txt".into(),
+        cwd: None,
+    });
+    source
+        .work
+        .iter_mut()
+        .find(|item| item.node == "implementation")
+        .unwrap()
+        .artifact_paths = vec!["src/result.txt".into()];
+    let bundle = super::super::master::compile(source).unwrap();
+    let mut conn = store::open_memory();
+    let submission = submit(&mut conn, &bundle.execution);
+    let task = tasks::get_task(&conn, &submission.task_ids["implementation"])
+        .unwrap()
+        .unwrap();
+    let worktree =
+        crate::coord::workspace::expected_task_workspace_at(&task, worktrees.path()).unwrap();
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&worktree)
+        .arg("HEAD")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::create_dir_all(worktree.join("src")).unwrap();
+    std::fs::write(worktree.join("src/result.txt"), "agent result").unwrap();
+    tasks::set_workspace_path(&conn, &task.id, worktree.to_str().unwrap()).unwrap();
+    for wave in &bundle.execution.waves {
+        for id in wave {
+            if id == "implementation" {
+                tasks::transition(
+                    &mut conn,
+                    &task.id,
+                    TaskState::Pending,
+                    TaskState::Done,
+                    "test-agent-completed",
+                )
+                .unwrap();
+            } else if matches!(
+                bundle
+                    .execution
+                    .spec
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == *id)
+                    .unwrap()
+                    .executor,
+                Some(ExecutorSpec::Shell { .. })
+            ) {
+                if id == "verification" {
+                    let task_id = &submission.task_ids[id];
+                    let expected_attempt = tasks::attempt_count(&conn, task_id).unwrap() + 1;
+                    let claim =
+                        claim_at(&mut conn, task_id, expected_attempt, Some(worktrees.path()))
+                            .unwrap()
+                            .unwrap();
+                    let mut evidence = super::super::runner::execute_once(
+                        &claim.node,
+                        &claim.fingerprint,
+                        claim.attempt,
+                        &ProviderRegistry::new(),
+                        repo.path(),
+                    )
+                    .unwrap();
+                    let source = claim.artifact_source.as_ref().unwrap();
+                    let after = super::observe_artifacts(
+                        &source.task,
+                        &source.paths,
+                        source.worktree_root.as_deref(),
+                    );
+                    assert!(source.baseline.iter().zip(&after).all(|(a, b)| {
+                        a.path == b.path && a.sha256 == b.sha256 && a.bytes == b.bytes
+                    }));
+                    evidence.artifact_attestations = after;
+                    finish(&mut conn, &claim, &evidence).unwrap();
+                } else {
+                    run(&mut conn, &submission.task_ids[id], repo.path());
+                }
+            }
+        }
+    }
+
+    let status = status_from_durable_at(
+        &mut conn,
+        &bundle,
+        &submission.graph_run_id,
+        Some(worktrees.path()),
+    )
+    .unwrap();
+    let implementation = &status.plan.work["implementation"];
+    assert_eq!(implementation.state, WorkState::Verified);
+    assert_eq!(implementation.deliverable_evidence.len(), 1);
+    assert_eq!(
+        implementation.deliverable_evidence[0].state,
+        super::super::runner::ArtifactState::Present
+    );
+    assert_eq!(implementation.deliverable_evidence[0].bytes, Some(12));
+    assert!(
+        implementation.deliverable_evidence[0]
+            .sha256
+            .as_ref()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    let json = serde_json::to_value(&status).unwrap();
+    for pointer in &implementation.evidence {
+        assert!(
+            json.pointer(pointer).is_some(),
+            "unresolved evidence pointer: {pointer}"
+        );
+    }
+
+    std::fs::write(worktree.join("src/result.txt"), "changed after verifier").unwrap();
+    let changed = status_from_durable_at(
+        &mut conn,
+        &bundle,
+        &submission.graph_run_id,
+        Some(worktrees.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        changed.plan.work["implementation"].state,
+        WorkState::Implemented
+    );
+
+    std::fs::remove_file(worktree.join("src/result.txt")).unwrap();
+    let missing = status_from_durable_at(
+        &mut conn,
+        &bundle,
+        &submission.graph_run_id,
+        Some(worktrees.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        missing.plan.work["implementation"].state,
+        WorkState::Planned
+    );
+    assert!(
+        missing.plan.work["implementation"]
+            .blockers
+            .contains(&"deliverable:src/result.txt".into())
+    );
+    std::fs::remove_dir_all(worktrees.path()).unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["worktree", "prune"])
+        .output();
+}
+
+#[test]
+fn artifact_observer_hashes_files_and_rejects_missing_or_escaping_paths() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/out.txt"), "agent result").unwrap();
+    let present = super::observe_artifact(Some(root.path()), "src/out.txt", 7);
+    assert_eq!(present.state, super::super::runner::ArtifactState::Present);
+    assert_eq!(present.bytes, Some(12));
+    assert!(present.sha256.as_ref().unwrap().starts_with("sha256:"));
+    assert_eq!(present.observed_at_ms, 7);
+
+    let missing = super::observe_artifact(Some(root.path()), "src/missing.txt", 8);
+    assert_eq!(missing.state, super::super::runner::ArtifactState::Missing);
+    for path in ["../outside", "/etc/passwd", "src\\outside"] {
+        assert_eq!(
+            super::observe_artifact(Some(root.path()), path, 9).state,
+            super::super::runner::ArtifactState::Unsafe,
+            "{path}"
+        );
+    }
+    #[cfg(unix)]
+    {
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("src/link")).unwrap();
+        assert_eq!(
+            super::observe_artifact(Some(root.path()), "src/link", 10).state,
+            super::super::runner::ArtifactState::Unsafe
+        );
+    }
 }
 
 #[test]

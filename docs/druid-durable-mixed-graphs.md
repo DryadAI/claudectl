@@ -3,7 +3,8 @@
 PR #3 extends the existing supervisor bridge from PR #1 and the master compiler
 from PR #2. There is still one durable scheduler: `Supervisor::tick`. Command,
 check, provider, agent, and approval nodes all use the same task IDs, dependency
-ledger, attempts and graph-run state. The canonical JSON IR is unchanged.
+ledger, attempts and graph-run state. The canonical JSON IR includes optional
+agent artifact paths; old graph documents deserialize with an empty list.
 
 ## Supported execution
 
@@ -15,13 +16,22 @@ ledger, attempts and graph-run state. The canonical JSON IR is unchanged.
 | Approval | Persisted human decision | Exact run/node/digest; no daemon stdin prompt |
 | Subgraph or typed artifact edge | Rejected at submission | Not silently interpreted as executable transport |
 
-Non-agent execution uses shared workspaces. Shell working directories and agent
+Non-agent execution uses shared workspaces by default. A shell check may select
+`workspace.mode: worktree` only when it directly depends on exactly one agent;
+the supervisor then runs it from that agent's run-specific worktree. Master-plan
+verifier links enforce this for agent work. Shell commands retain the explicit
+unsandboxed opt-in and caller permissions. Shell working directories and agent
 source directories are resolved to absolute paths at submission. Provider
 filesystem scopes and `request.target`, when present, must already be absolute.
 Generic provider requests remain adapter-defined; there is no universal path
-rewriter. Agent worktrees are independent: a downstream shared check does **not**
-automatically inspect an upstream agent's worktree. Use the agent's own verifiers
-for that; artifact transport and worktree integration remain unsupported.
+rewriter. Agent worktrees remain isolated. A master work item's relative
+`artifact_paths` are bound into the canonical run snapshot. Durable master status
+observes only regular, non-symlink files within that exact worktree, up to 64 MiB
+each, and returns a timestamped SHA-256 manifest. These read-time observations
+appear in returned JSON and are not written to SQLite. Missing or unsafe paths
+keep agent work planned. Linked independent shell checks run inside the same
+worktree and must pass before the work becomes verified. This is file content
+evidence, not author identity or a signed attestation.
 
 ## Submission and approval
 
@@ -99,11 +109,12 @@ contract. Use short, bounded operations in a dedicated test daemon.
 
 `graph master status plan.json --report FILE` consumes local-runner reports;
 `graph master status plan.json --run RUN_ID` now provides a read-only projection
-of one exact durable run. The latter embeds execution evidence and approval
-decisions alongside work states. It does not fabricate local-runner evidence or
-mix runs. Agent DONE is not automatically proof of a planned deliverable or
-independent verification; inspect its recorded verifier evidence. No production
-verification is inferred. See the [master-plan status contract](druid-master-plans.md).
+of one exact durable run. The latter embeds execution evidence, artifact hashes
+and approval decisions alongside work states. It does not fabricate local-runner
+evidence or mix runs. Agent DONE alone is not proof of a planned deliverable:
+declared files must be present in the task's run-specific worktree, and every
+linked independent verifier must pass. No production verification is inferred.
+See the [master-plan status contract](druid-master-plans.md).
 
 ## Authority and upgrade safety
 

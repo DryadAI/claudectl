@@ -202,6 +202,7 @@ mod tests {
         let mut node = NodeSpec {
             id: "inspect".into(),
             kind: super::super::schema::NodeKind::Tool,
+            artifact_paths: vec![],
             description: None,
             requires: vec![CAP_JAVASCRIPT_ANALYZE.into()],
             authority: super::super::schema::Authority::default(),

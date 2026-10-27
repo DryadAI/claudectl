@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::compiler::{self, CompiledGraph};
-use super::runner::{EvidenceConfidence, RunReport};
+use super::runner::{ArtifactAttestation, ArtifactState, EvidenceConfidence, RunReport};
 use super::schema::{GraphSpec, NodeKind, Outcome, RiskLevel};
 
 const COMPILER_VERSION: &str = "druid-master-v1";
@@ -55,6 +55,10 @@ pub struct WorkItem {
     pub requirements: Vec<String>,
     /// Intended artifacts; listing one here is never evidence of its existence.
     pub deliverables: Vec<String>,
+    /// Relative paths in an agent's isolated worktree that must exist before
+    /// the work item can be marked implemented.
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
     /// Independent downstream check nodes whose observed PASS verifies this item.
     pub verify_with: Vec<String>,
 }
@@ -114,6 +118,8 @@ pub struct WorkStatus {
     pub outcome: Outcome,
     pub requirements: Vec<String>,
     pub intended_deliverables: Vec<String>,
+    /// Read-only, run-bound observations of declared agent worktree files.
+    pub deliverable_evidence: Vec<ArtifactAttestation>,
     /// JSON pointers within the local report or embedded durable evidence, including verifiers.
     pub evidence: Vec<String>,
     pub blockers: Vec<String>,
@@ -164,7 +170,7 @@ fn ancestors(node: &str, graph: &CompiledGraph) -> BTreeSet<String> {
     found
 }
 
-pub fn compile(source: MasterPlan) -> Result<CompiledMasterPlan, String> {
+pub fn compile(mut source: MasterPlan) -> Result<CompiledMasterPlan, String> {
     if source.version != 1 || source.revision == 0 {
         return Err("master plan requires version 1 and a positive revision".into());
     }
@@ -195,7 +201,25 @@ pub fn compile(source: MasterPlan) -> Result<CompiledMasterPlan, String> {
         }
     }
 
-    // First validate the unchanged canonical IR, including typed edges, cycles,
+    // Lower master-plan artifact contracts into the canonical graph IR so the
+    // durable snapshot and executor validate the same paths as this plan.
+    for item in &source.work {
+        let node = source
+            .graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == item.node)
+            .ok_or_else(|| format!("work references missing node '{}'", item.node))?;
+        if !node.artifact_paths.is_empty() && node.artifact_paths != item.artifact_paths {
+            return Err(format!(
+                "node '{}' artifact paths differ between graph and master work item",
+                item.node
+            ));
+        }
+        node.artifact_paths.clone_from(&item.artifact_paths);
+    }
+
+    // First validate the canonical IR, including typed edges, cycles,
     // capability declarations, retries, network/push policy and risk contracts.
     let validated = compiler::compile(source.graph.clone())?;
     let nodes: BTreeMap<_, _> = validated
@@ -221,8 +245,12 @@ pub fn compile(source: MasterPlan) -> Result<CompiledMasterPlan, String> {
                 item.node
             ));
         }
+        for path in &item.artifact_paths {
+            super::schema::validate_artifact_path(path)?;
+        }
         unique(&item.requirements, "requirement link")?;
         unique(&item.deliverables, "deliverable")?;
+        unique(&item.artifact_paths, "artifact path")?;
         unique(&item.verify_with, "verifier link")?;
         for requirement in &item.requirements {
             if !requirements.contains(requirement) {
@@ -247,6 +275,12 @@ pub fn compile(source: MasterPlan) -> Result<CompiledMasterPlan, String> {
     }
     for item in &source.work {
         let node = nodes[item.node.as_str()];
+        if (node.kind == NodeKind::Agent) != !item.artifact_paths.is_empty() {
+            return Err(format!(
+                "agent work '{}' must declare artifact_paths; other nodes must not",
+                item.node
+            ));
+        }
         let upstream = ancestors(&item.node, &validated);
         let prerequisite = match item.phase {
             Phase::Discovery => None,
@@ -291,6 +325,16 @@ pub fn compile(source: MasterPlan) -> Result<CompiledMasterPlan, String> {
             {
                 return Err(format!(
                     "node '{}' verifier '{verifier}' must be an independent downstream verification check",
+                    item.node
+                ));
+            }
+            if node.kind == NodeKind::Agent
+                && (!validated.dependencies[verifier].contains(&item.node)
+                    || nodes[verifier.as_str()].workspace.mode
+                        != super::schema::WorkspaceMode::Worktree)
+            {
+                return Err(format!(
+                    "agent '{}' verifier '{verifier}' must directly depend on the agent and use its worktree",
                     item.node
                 ));
             }
@@ -447,7 +491,9 @@ pub fn status(
                         "node '{id}' shell PASS lacks matching command and zero exit evidence"
                     ));
                 }
-                observed.insert(id.clone());
+                if node.kind != NodeKind::Agent {
+                    observed.insert(id.clone());
+                }
             }
         }
         // A report cannot claim that a node ran past a failed prerequisite.
@@ -482,6 +528,8 @@ pub fn status(
         &observed,
         &outcomes,
         &links,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
         report.map(|r| r.run_dir.clone()),
     ))
 }
@@ -491,6 +539,8 @@ fn project_status(
     observed: &BTreeSet<String>,
     outcomes: &BTreeMap<String, Outcome>,
     links: &BTreeMap<String, Vec<String>>,
+    artifact_evidence: &BTreeMap<String, Vec<ArtifactAttestation>>,
+    verified_agents: &BTreeSet<String>,
     run_dir: Option<String>,
 ) -> PlanStatus {
     let graph = &bundle.execution;
@@ -508,12 +558,28 @@ fn project_status(
         let implemented = observed.contains(&item.node);
         let verified = implemented
             && !item.verify_with.is_empty()
-            && item.verify_with.iter().all(|id| observed.contains(id));
+            && item.verify_with.iter().all(|id| observed.contains(id))
+            && (item.artifact_paths.is_empty() || verified_agents.contains(&item.node));
         let mut blockers: Vec<_> = graph.dependencies[&item.node]
             .iter()
             .filter(|id| !observed.contains(*id))
             .cloned()
             .collect();
+        let deliverable_evidence = artifact_evidence
+            .get(&item.node)
+            .cloned()
+            .unwrap_or_default();
+        blockers.extend(
+            deliverable_evidence
+                .iter()
+                .filter(|e| e.state != ArtifactState::Present)
+                .map(|e| format!("deliverable:{}", e.path)),
+        );
+        let node_pointer = item.node.replace('~', "~0").replace('/', "~1");
+        evidence.extend(
+            (0..deliverable_evidence.len())
+                .map(|index| format!("/work/{node_pointer}/deliverable_evidence/{index}")),
+        );
         blockers.extend(
             item.verify_with
                 .iter()
@@ -539,6 +605,7 @@ fn project_status(
                     .unwrap_or(Outcome::Unknown),
                 requirements: item.requirements.clone(),
                 intended_deliverables: item.deliverables.clone(),
+                deliverable_evidence,
                 evidence,
                 blockers,
             },
@@ -567,6 +634,16 @@ pub(crate) fn status_from_durable(
     bundle: &CompiledMasterPlan,
     run: &str,
 ) -> Result<DurablePlanStatus, String> {
+    status_from_durable_at(conn, bundle, run, None)
+}
+
+#[cfg(feature = "coord")]
+pub(crate) fn status_from_durable_at(
+    conn: &mut rusqlite::Connection,
+    bundle: &CompiledMasterPlan,
+    run: &str,
+    worktree_root: Option<&std::path::Path>,
+) -> Result<DurablePlanStatus, String> {
     validate_bundle(bundle)?;
     // One read transaction prevents joining old task state to newer evidence.
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -580,6 +657,11 @@ pub(crate) fn status_from_durable(
     let mut observed = BTreeSet::new();
     let mut outcomes = BTreeMap::new();
     let mut links = BTreeMap::new();
+    let tasks_by_id: BTreeMap<_, _> = crate::coord::tasks::list_tasks_for_graph_run(&tx, run)?
+        .into_iter()
+        .map(|task| (task.id.clone(), task))
+        .collect();
+    let mut artifact_evidence = BTreeMap::new();
     for (index, result) in durable.nodes.iter().enumerate() {
         let node = bundle
             .execution
@@ -602,8 +684,17 @@ pub(crate) fn status_from_durable(
         links.insert(node.id.clone(), node_links);
         match node.kind {
             NodeKind::Agent => {
-                // Session completion and attached verifier summaries are not an
-                // independent observation that the planned deliverable exists.
+                if result.state == "DONE" && !node.artifact_paths.is_empty() {
+                    let task = tasks_by_id
+                        .get(&result.task_id)
+                        .ok_or("durable task missing")?;
+                    let artifacts =
+                        super::mixed::observe_artifacts(task, &node.artifact_paths, worktree_root);
+                    if artifacts.iter().all(|a| a.state == ArtifactState::Present) {
+                        observed.insert(node.id.clone());
+                    }
+                    artifact_evidence.insert(node.id.clone(), artifacts);
+                }
                 continue;
             }
             NodeKind::Approval => {
@@ -677,7 +768,47 @@ pub(crate) fn status_from_durable(
             .iter()
             .all(|dep| outcomes.get(dep) == Some(&Outcome::Pass))
     });
-    let plan = project_status(bundle, &observed, &outcomes, &links, None);
+    let mut verified_agents = BTreeSet::new();
+    for item in &bundle.source.work {
+        if item.artifact_paths.is_empty() || !observed.contains(&item.node) {
+            continue;
+        }
+        let Some(current) = artifact_evidence.get(&item.node) else {
+            continue;
+        };
+        let same_manifest = |attested: &[ArtifactAttestation]| {
+            attested.len() == current.len()
+                && attested.iter().all(|saved| {
+                    current.iter().any(|now| {
+                        saved.path == now.path
+                            && saved.state == ArtifactState::Present
+                            && now.state == ArtifactState::Present
+                            && saved.sha256 == now.sha256
+                            && saved.bytes == now.bytes
+                    })
+                })
+        };
+        if item.verify_with.iter().all(|verifier| {
+            observed.contains(verifier)
+                && durable
+                    .nodes
+                    .iter()
+                    .find(|n| n.node_id == *verifier)
+                    .and_then(|n| n.evidence.last())
+                    .is_some_and(|e| same_manifest(&e.artifact_attestations))
+        }) {
+            verified_agents.insert(item.node.clone());
+        }
+    }
+    let plan = project_status(
+        bundle,
+        &observed,
+        &outcomes,
+        &links,
+        &artifact_evidence,
+        &verified_agents,
+        None,
+    );
     tx.commit().map_err(|e| e.to_string())?;
     Ok(DurablePlanStatus { plan, durable })
 }

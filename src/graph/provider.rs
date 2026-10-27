@@ -159,6 +159,7 @@ mod tests {
         let node = NodeSpec {
             id: "inspect".into(),
             kind: NodeKind::Tool,
+            artifact_paths: vec![],
             description: None,
             requires: vec!["example.inspect".into()],
             authority: Authority::default(),

@@ -208,7 +208,7 @@ The most important remaining gaps are:
 
 1. **Durable environment integration remains unverified.** [PR #2 local validation](validation/druid-master-compiler-v1.md) covers formatting, check, clippy, tests and the local master-plan example; it does not exercise production agent launches or installed hooks.
 2. No automatic fan-in/integration/merge of independent worktrees.
-3. Mixed execution is persisted, but interrupted deterministic attempts remain UNKNOWN rather than being replayed. Master status can now read a durable run with `--run`; this does not attest agent deliverables or export a synthetic local-runner report.
+3. Mixed execution is persisted, but interrupted deterministic attempts remain UNKNOWN rather than being replayed. Master status can read a durable run with `--run` and now reports hashes for declared agent deliverables in the exact worktree; this does not attest author identity or export a synthetic local-runner report.
 4. No enforced wall-clock cancellation/termination contract.
 5. No automatic worktree cleanup.
 6. No signed authorization binding execution to verified repository state. Master plans now have SHA-256 content identity over the authored graph, source claims and authority; the runtime does not attest those claims or enforce a signed approval digest.
