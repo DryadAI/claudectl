@@ -924,7 +924,8 @@ pub(crate) fn execute(
     let rea = super::rea::ReaCliProvider;
     let mut registry = ProviderRegistry::new();
     registry.register(&rea);
-    let home = std::env::var_os("HOME").ok_or("HOME is required for durable graph evidence")?;
+    let home =
+        claudectl_core::profile::home().ok_or("HOME is required for durable graph evidence")?;
     execute_with_registry(
         conn,
         task_id,

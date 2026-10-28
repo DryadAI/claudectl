@@ -248,7 +248,7 @@ fn workspace_mode(policy: Option<&Value>) -> WorkspaceMode {
 }
 
 fn workspace_root() -> PathBuf {
-    let home = std::env::var_os("HOME")
+    let home = claudectl_core::profile::home()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     home.join(".claudectl").join("worktrees")

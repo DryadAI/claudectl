@@ -8,7 +8,7 @@ fn sessions_dir() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
+    crate::profile::home()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
 }

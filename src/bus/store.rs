@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let home = claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into());
     PathBuf::from(home)
         .join(".claudectl")
         .join("bus")

@@ -26,6 +26,8 @@ mod config;
 #[cfg(feature = "coord")]
 mod coord;
 mod doctor;
+#[cfg(feature = "coord")]
+mod execution_profile;
 mod graph;
 #[cfg(feature = "hive")]
 mod hive;
@@ -61,6 +63,12 @@ pub(crate) struct ViewFilters {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    #[cfg(feature = "coord")]
+    /// Create or inspect an isolated graph execution profile (no credentials copied).
+    Profile {
+        #[command(subcommand)]
+        command: execution_profile::ProfileCommand,
+    },
     /// Graph validation, planning, and seed execution
     Graph {
         #[command(subcommand)]
@@ -597,6 +605,40 @@ pub(crate) struct Cli {
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
+    #[cfg(not(feature = "coord"))]
+    if claudectl_core::profile::active() {
+        return Err(io::Error::other(
+            "isolated profiles require the coord feature",
+        ));
+    }
+    #[cfg(feature = "coord")]
+    if let Some(Command::Profile { command }) = &cli.command {
+        return execution_profile::dispatch(command);
+    }
+    #[cfg(feature = "coord")]
+    if claudectl_core::profile::active() {
+        execution_profile::validate_active()?;
+        return match cli.command {
+            Some(Command::Graph { command }) => graph::dispatch(&command, cli.json),
+            Some(Command::Ingest { hook }) => {
+                if ingest::run(&hook)? == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("profile ingest failed"))
+                }
+            }
+            None if cli.headless => commands::run_headless(
+                Duration::from_millis(2000),
+                &config::Config::default(),
+                cli.json,
+            ),
+            _ => {
+                return Err(io::Error::other(
+                    "isolated profiles support only graph, ingest and --headless",
+                ));
+            }
+        };
+    }
     let is_demo = cli.demo;
     let result = run_main(cli);
     if result.is_ok() {
@@ -858,6 +900,8 @@ fn run_main(cli: Cli) -> io::Result<()> {
 
     if let Some(ref command) = cli.command {
         match command {
+            #[cfg(feature = "coord")]
+            Command::Profile { command } => return execution_profile::dispatch(command),
             Command::Graph { command } => return graph::dispatch(command, cli.json),
             #[cfg(feature = "relay")]
             Command::Relay { command } => return relay::cli::dispatch_command(command, cli.json),

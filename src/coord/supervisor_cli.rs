@@ -322,7 +322,7 @@ fn serve_metrics(bind: &str) -> io::Result<()> {
 }
 
 pub fn drain_marker_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
+    let home = claudectl_core::profile::home()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     home.join(".claudectl").join("coord").join("drain")
