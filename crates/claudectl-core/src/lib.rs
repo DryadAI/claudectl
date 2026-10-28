@@ -25,6 +25,7 @@ pub mod logger;
 pub mod models;
 pub mod monitor;
 pub mod process;
+pub mod profile;
 pub mod rules;
 pub mod runtime;
 pub mod session;

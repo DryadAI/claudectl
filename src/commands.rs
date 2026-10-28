@@ -1388,6 +1388,12 @@ impl crate::coord::actuator::SideEffects for NoopSideEffects {
 
 #[cfg(feature = "coord")]
 fn send_supervised_input(session_id: &str, text: &str) -> Result<(), String> {
+    if claudectl_core::profile::active() {
+        return Err(
+            "isolated noninteractive agents cannot receive terminal input; retry as a new attempt"
+                .into(),
+        );
+    }
     let sessions = discovery::scan_sessions();
     let session = sessions
         .iter()
@@ -1398,6 +1404,9 @@ fn send_supervised_input(session_id: &str, text: &str) -> Result<(), String> {
 
 #[cfg(feature = "coord")]
 fn launch_supervised_session(cwd: &std::path::Path, prompt: &str) -> Result<String, String> {
+    if claudectl_core::profile::active() {
+        return crate::execution_profile::spawn(cwd, prompt).map_err(|e| e.to_string());
+    }
     let request = launch::prepare(cwd.to_string_lossy().as_ref(), Some(prompt), None)?;
 
     let mut existing = discovery::scan_sessions();

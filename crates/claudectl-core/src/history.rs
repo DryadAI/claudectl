@@ -16,7 +16,7 @@ pub struct SessionRecord {
 }
 
 fn history_dir() -> PathBuf {
-    std::env::var_os("HOME")
+    crate::profile::home()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".local")

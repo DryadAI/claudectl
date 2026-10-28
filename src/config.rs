@@ -288,6 +288,10 @@ struct RawIdleConfig {
 impl Config {
     /// Load configuration from global and project config files.
     pub fn load() -> Self {
+        // Profiles deliberately ignore shared and repository automation rules.
+        if claudectl_core::profile::active() {
+            return Self::default();
+        }
         let mut config = Config::default();
 
         // Layer 1: Global config
@@ -1402,6 +1406,9 @@ pub fn validate_config_file(path: &PathBuf) -> (Vec<ConfigWarning>, bool) {
 /// Load hooks from global and project config files.
 pub fn load_hooks() -> crate::hooks::HookRegistry {
     let mut registry = crate::hooks::HookRegistry::new();
+    if claudectl_core::profile::active() {
+        return registry;
+    }
 
     if let Some(global) = global_config_path() {
         parse_hooks_from_file(&global, &mut registry);

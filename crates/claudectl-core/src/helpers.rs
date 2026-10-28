@@ -119,7 +119,7 @@ pub fn fire_notification(message: &str) {
 
 /// Resolve the user's home directory, falling back to /tmp.
 pub fn dirs_home() -> std::path::PathBuf {
-    std::env::var_os("HOME")
+    crate::profile::home()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
 }

@@ -26,13 +26,26 @@ pub fn authorize_stdin() -> io::Result<()> {
     let mut raw = String::new();
     io::stdin().read_to_string(&mut raw)?;
     let Ok(payload) = serde_json::from_str::<HookPayload>(&raw) else {
+        if claudectl_core::profile::active() {
+            return emit_deny("invalid isolated-profile hook payload");
+        }
         return Ok(());
     };
     let (Some(session_id), Some(tool_name)) =
         (payload.session_id.as_deref(), payload.tool_name.as_deref())
     else {
+        if claudectl_core::profile::active() {
+            return emit_deny("missing isolated-profile hook identity");
+        }
         return Ok(());
     };
+    if claudectl_core::profile::active()
+        && !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return emit_deny("invalid isolated-profile session identity");
+    }
 
     let policy = match session_policy::read_strict(session_id) {
         Ok(Some(policy)) => Some(policy),
@@ -56,9 +69,15 @@ pub fn authorize_stdin() -> io::Result<()> {
         }
     };
     let Some(policy) = policy else {
+        if claudectl_core::profile::active() {
+            return emit_deny("isolated-profile authority policy is missing");
+        }
         return Ok(());
     };
     let Some(graph) = policy.graph.as_ref() else {
+        if claudectl_core::profile::active() {
+            return emit_deny("isolated-profile graph authority is missing");
+        }
         return Ok(());
     };
 
