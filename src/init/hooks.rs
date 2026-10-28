@@ -78,11 +78,14 @@ fn build_hooks_value() -> serde_json::Value {
     let mut hooks_map = serde_json::Map::new();
 
     for spec in HOOKS {
-        let hook_entry = serde_json::json!({
+        let mut hook_entry = serde_json::json!({
             "type": "command",
             "command": spec.command,
             "timeout": spec.timeout,
         });
+        if spec.command == "claudectl graph authorize-tool" {
+            hook_entry["onFailure"] = serde_json::json!("block");
+        }
 
         let matcher_entry = serde_json::json!({
             "matcher": spec.matcher,
@@ -381,6 +384,7 @@ mod tests {
     #[test]
     fn test_hook_set_contains_authority_and_lifecycle_ingest() {
         let hooks = build_hooks_value();
+        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["onFailure"], "block");
         let serialized = serde_json::to_string(&hooks).unwrap();
         assert!(serialized.contains("claudectl graph authorize-tool"));
         for event in ["PreToolUse", "PostToolUse", "SessionStart", "Stop"] {

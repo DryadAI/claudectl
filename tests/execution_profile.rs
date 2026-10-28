@@ -43,6 +43,11 @@ fn denied(output: Output) {
         String::from_utf8_lossy(&output.stderr)
     );
     let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    // PreToolUse does not accept a top-level decision:"deny". A mixed
+    // schema can be discarded by Claude despite the nested denial field.
+    assert_eq!(body.as_object().unwrap().len(), 1);
+    assert_eq!(body["hookSpecificOutput"].as_object().unwrap().len(), 3);
+    assert_eq!(body["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(body["hookSpecificOutput"]["permissionDecision"], "deny");
 }
 
@@ -52,6 +57,12 @@ fn creates_private_profile_without_copying_credentials_and_refuses_reuse() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("profile with spaces");
     init(&root);
+    let settings: Value =
+        serde_json::from_slice(&fs::read(root.join(".claude/settings.json")).unwrap()).unwrap();
+    assert_eq!(
+        settings["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"],
+        "block"
+    );
     assert_eq!(
         fs::metadata(&root).unwrap().permissions().mode() & 0o777,
         0o700

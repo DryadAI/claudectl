@@ -1,5 +1,8 @@
 # Isolated graph execution profiles
 
+See the [live pilot report](live-authority-pilot.md) for the initial enforcement
+failure, correction and independently checked passing rerun.
+
 An opt-in Linux execution profile separates development graph state from the
 operator's normal Claude sessions. It uses the existing supervisor, not a second
 scheduler. This is application-state isolation **not an OS security sandbox**.
@@ -7,7 +10,7 @@ Do not give untrusted shell checks access to secrets or production infrastructur
 
 ## Setup
 
-Use a stable full-featured claudectl binary and a current Claude Code executable
+Use a stable full-featured claudectl binary and Claude Code 2.1.295 or newer
 on PATH. Choose a new absolute directory whose parent already exists:
 
 ```sh
@@ -53,6 +56,11 @@ This adapter currently requires Linux `/proc/sys/kernel/random/uuid`.
 Profile tool calls fail closed on missing/malformed authority and invalid session
 identity. Missing/changed profile settings or executable pins fail startup. The
 authority shell wrapper converts executable failure to blocking exit code 2.
+The authority hook also sets `onFailure: "block"` so invalid output and timeouts
+cannot silently fall through to ordinary permissions. Denials use only the
+supported `hookSpecificOutput` PreToolUse schema; top-level `decision: "deny"`
+is invalid and must not be added. See the
+[official hook contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
 This does not defend against another process with the same OS user's privileges,
 and it does not sandbox shell verifier nodes. Platform-managed Claude settings,
 network egress, CLI compatibility and operator identity still require review.
