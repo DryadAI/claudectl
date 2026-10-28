@@ -45,7 +45,7 @@ fn settings(root: &Path, binary: &Path) -> Value {
         if event == "PreToolUse" {
             // Claude only treats exit 2 as a blocking hook error. Preserve denial
             // even if the pinned executable disappears or fails to start.
-            entries.push(json!({"type":"command", "command":format!("{invocation} graph authorize-tool || exit 2"), "timeout":10}));
+            entries.push(json!({"type":"command", "command":format!("{invocation} graph authorize-tool || exit 2"), "timeout":10, "onFailure":"block"}));
         }
         entries.push(json!({"type":"command", "command":format!("{invocation} ingest --hook {event}"), "timeout":10}));
         hooks.insert(event.into(), json!([{"matcher":"*", "hooks":entries}]));

@@ -248,14 +248,10 @@ fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
 
 fn emit_deny(reason: &str) -> io::Result<()> {
     let output = serde_json::json!({
-        "decision": "deny",
-        "reason": format!("claudectl graph policy: {reason}"),
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-            "continueOnBlock": true,
-            "systemMessage": format!("claudectl graph policy blocked this call: {reason}")
+            "permissionDecisionReason": format!("claudectl graph policy: {reason}")
         }
     });
     println!("{output}");
