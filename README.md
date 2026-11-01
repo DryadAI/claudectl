@@ -435,6 +435,7 @@ Press `R` on any session for a highlight reel GIF (edits, commands, errors — i
 | | |
 |---|---|
 | [DRUID Master Plans](docs/druid-master-plans.md) | Versioned graph compilation, requirements, evidence-linked status |
+| [Headless Worker Adapter](docs/HEADLESS_WORKER.md) | Bounded Claude Code development transport; activation and isolation gates |
 | [Graph Runtime](docs/graph-bootstrap.md) | Canonical IR, local execution, durable supervisor |
 | [Isolated Graph Profiles](docs/isolated-graph-profiles.md) | Separate development execution state, pinned hooks and login |
 | [Durable Mixed Graphs](docs/druid-durable-mixed-graphs.md) | One supervisor, persisted evidence, digest-bound human approval |

@@ -3,6 +3,10 @@ pub mod authority;
 pub mod compiler;
 #[cfg(feature = "coord")]
 pub mod durable;
+#[cfg(unix)]
+// Public library adapter; deliberately not registered in the embedded CLI yet.
+#[allow(dead_code)]
+pub mod headless;
 pub mod master;
 #[cfg(feature = "coord")]
 pub mod mixed;
