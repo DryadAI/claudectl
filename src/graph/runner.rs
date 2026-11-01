@@ -100,7 +100,7 @@ fn run_with_base(compiled: &CompiledGraph, base: &Path) -> io::Result<RunReport>
     run_with_registry(compiled, &providers, base)
 }
 
-fn run_with_registry(
+pub(crate) fn run_with_registry(
     compiled: &CompiledGraph,
     providers: &ProviderRegistry<'_>,
     base: &Path,

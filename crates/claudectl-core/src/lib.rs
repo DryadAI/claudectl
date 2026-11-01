@@ -16,6 +16,8 @@
 pub mod config;
 pub mod discovery;
 pub mod forecast;
+#[cfg(unix)]
+pub mod headless;
 pub mod health;
 pub mod helpers;
 pub mod history;
