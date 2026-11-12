@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use super::provider::{Provider, ProviderConfidence, ProviderContext, ProviderResult};
 use super::schema::{NetworkAuthority, NodeKind, NodeSpec, Outcome, WorkspaceMode};
+use super::standing_policy::PolicyPermit;
 
 pub const CAPABILITY: &str = "agent.execute";
 
@@ -18,6 +19,9 @@ pub struct HeadlessProvider<'a> {
     /// This object cannot be enabled by a graph JSON property.
     pub worker: &'a WorkerConfig,
     pub cancelled: &'a AtomicBool,
+    /// Created by the protected supervisor-side standing-policy loader. A
+    /// worker cannot synthesize this permit from graph JSON or its worktree.
+    pub permit: &'a PolicyPermit,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +47,7 @@ impl Provider for HeadlessProvider<'_> {
         _context: &ProviderContext<'_>,
     ) -> Result<ProviderResult, String> {
         if capability != CAPABILITY
+            || node.id != self.permit.task_id
             || node.kind != NodeKind::Agent
             || node.workspace.mode != WorkspaceMode::Worktree
             || node.authority.git_commit
@@ -82,6 +87,7 @@ impl Provider for HeadlessProvider<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::standing_policy::PolicyPermit;
     use super::super::{compiler::compile, provider::ProviderRegistry, runner, schema::GraphSpec};
     use super::*;
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Duration};
@@ -110,6 +116,11 @@ mod tests {
         let adapter = HeadlessProvider {
             worker: &worker,
             cancelled: &cancel,
+            permit: &PolicyPermit {
+                policy_id: "test".into(),
+                task_id: "candidate".into(),
+                repository_remote: "https://github.com/DryadAI/claudectl".into(),
+            },
         };
         let mut registry = ProviderRegistry::new();
         registry.register(&adapter);
@@ -153,6 +164,18 @@ mod tests {
         assert!(
             adapter
                 .execute(&denied, CAPABILITY, &serde_json::json!({}), &context)
+                .is_err()
+        );
+        let mut wrong_task = node.clone();
+        wrong_task.id = "worker-self-approved".into();
+        assert!(
+            adapter
+                .execute(
+                    &wrong_task,
+                    CAPABILITY,
+                    &serde_json::json!({"cwd":worker.workspace,"prompt":"x"}),
+                    &context
+                )
                 .is_err()
         );
         let empty = ProviderRegistry::new();

@@ -19,6 +19,13 @@ This Precision session fails that probe: Bubblewrap cannot create its NETLINK_RO
 socket. Therefore the adapter must stay unregistered here. Do not replace it with
 an unsandboxed launcher or `--allow-unsandboxed-shell`.
 
+The supervisor reads the policy and revocation JSON with a protected owner and
+no group/other write permissions, validates its expiration/repository/operation
+and returns a one-task permit to the adapter. The adapter refuses a graph node
+whose task identity does not match that permit. Put the policy, revocations,
+approval ledger and audit records outside every worker worktree and outside the
+worker-owned home. A worker editing a copied policy file cannot alter the permit.
+
 ## Recovery and revocation
 
 On cancellation, timeout or output overflow the transport kills its process group

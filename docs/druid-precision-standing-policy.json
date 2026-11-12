@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "policy_id": "druid-precision-development-v1",
   "status": "inactive-until-host-sandbox-probe-passes",
+  "expires_at_unix_ms": 1798761600000,
   "repositories": [{"remote": "https://github.com/DryadAI/claudectl", "operations": ["read", "branch", "worktree", "edit", "test", "commit", "push-review-branch"]}],
   "identity": {"required_uid": "druid-worker", "no_sudo": true, "no_docker_socket": true, "no_ssh_agent": true, "home": "ephemeral"},
   "sandbox": {"launcher": "/usr/bin/bwrap", "network": "deny", "writable_mounts": ["/work"], "runtime_mounts": ["/usr", "/bin", "/lib", "/lib64", "/etc/ssl/certs"], "required": true},
