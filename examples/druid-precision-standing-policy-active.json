@@ -1,0 +1,18 @@
+{
+  "policy_id": "druid-precision-development-v1",
+  "status": "active",
+  "expires_at_unix_ms": 1798761600000,
+  "repositories": [{
+    "remote": "https://github.com/DryadAI/claudectl",
+    "operations": ["read", "branch", "worktree", "edit", "test", "commit", "push-review-branch"]
+  }],
+  "limits": {
+    "timeout_seconds": 3600,
+    "max_output_bytes": 1048576,
+    "max_turns": 100,
+    "max_budget_usd": 100,
+    "max_concurrency": 1,
+    "max_retries": 2
+  },
+  "fresh_human_approval_required": ["deploy", "production-network", "credential-change", "firewall-change", "privilege-change", "merge", "paid-api", "non-approved-egress"]
+}

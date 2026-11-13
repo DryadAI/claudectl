@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -19,6 +19,28 @@ pub struct WorkerConfig {
     pub max_output_bytes: usize,
     pub max_turns: u32,
     pub budget_usd: f64,
+    /// Trusted host egress configuration.  A graph and a worker never choose
+    /// this.  Proxy mode is usable only with a separately enforced host UID
+    /// egress-deny rule; otherwise Bubblewrap keeps its private network.
+    pub network: NetworkMode,
+    /// Mandatory OS boundary.  This is deliberately trusted host input, not
+    /// graph data: a worker cannot select a looser launcher or mount set.
+    pub sandbox: SandboxConfig,
+}
+
+pub enum NetworkMode {
+    Deny,
+    RootOwnedLoopbackProxy { url: String },
+}
+
+/// Bubblewrap configuration for a development worker.  The launcher starts
+/// with no network namespace, no home directory, no inherited environment and
+/// only explicit read-only runtime mounts plus a single writable worktree.
+/// A site that cannot provide this boundary must leave the provider unregistered.
+pub struct SandboxConfig {
+    pub executable: PathBuf,
+    pub runtime_mounts: Vec<PathBuf>,
+    pub worker_home: PathBuf,
 }
 
 pub struct WorkerResult {
@@ -40,24 +62,102 @@ impl WorkerConfig {
             || !self.budget_usd.is_finite()
             || self.budget_usd <= 0.0
             || self.budget_usd > 100.0
+            || !self.sandbox.executable.is_absolute()
+            || !self.sandbox.worker_home.is_absolute()
+            || self.sandbox.runtime_mounts.is_empty()
         {
             return Err("invalid trusted worker configuration".into());
         }
         if self.environment.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "HOME" | "PATH" | "TMPDIR" | "ANTHROPIC_API_KEY" | "ANTHROPIC_BASE_URL"
+                "HOME"
+                    | "PATH"
+                    | "TMPDIR"
+                    | "HTTP_PROXY"
+                    | "HTTPS_PROXY"
+                    | "NO_PROXY"
+                    | "CLAUDE_CODE_PROXY_RESOLVES_HOSTS"
+                    | "DISABLE_AUTOUPDATER"
             )
         }) {
             return Err("unsupported worker environment key".into());
         }
+        if !self.workspace.canonicalize().is_ok_and(|p| p == self.workspace)
+            || !self.sandbox.worker_home.starts_with("/tmp")
+            || self.sandbox.runtime_mounts.iter().any(|path| {
+                !path.is_absolute()
+                    || !matches!(path.as_path(), p if p == Path::new("/usr") || p == Path::new("/bin") || p == Path::new("/lib") || p == Path::new("/lib64") || p == Path::new("/etc/ssl/certs"))
+            })
+        {
+            return Err("invalid sandbox mount or worker home".into());
+        }
+        match &self.network {
+            NetworkMode::Deny if !self.environment.is_empty() => {
+                return Err("private-network worker may not receive route variables".into());
+            }
+            NetworkMode::Deny => {}
+            NetworkMode::RootOwnedLoopbackProxy { url }
+                if url != "http://127.0.0.1:18443"
+                    || self.environment.get("HTTP_PROXY") != Some(url)
+                    || self.environment.get("HTTPS_PROXY") != Some(url)
+                    || self.environment.get("NO_PROXY") != Some(&String::new())
+                    || self.environment.get("CLAUDE_CODE_PROXY_RESOLVES_HOSTS")
+                        != Some(&"1".to_owned())
+                    || self.environment.get("DISABLE_AUTOUPDATER") != Some(&"1".to_owned()) =>
+            {
+                return Err("invalid root-owned loopback proxy configuration".into());
+            }
+            NetworkMode::RootOwnedLoopbackProxy { .. } => {}
+        }
         // No implicit PATH lookup, inherited credentials, resume, plugins, MCP, shell,
         // background tasks, or permission bypass. Bare mode requires a compatible CLI.
-        let mut command = Command::new(&self.executable);
+        let mut command = Command::new(&self.sandbox.executable);
         command
             .env_clear()
-            .envs(&self.environment)
+            // Bubblewrap immediately chdirs to /work; setting the wrapper cwd
+            // also lets a launcher resolve its initial directory without HOME.
             .current_dir(&self.workspace)
+            .args([
+                "--unshare-all",
+                "--die-with-parent",
+                "--new-session",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--dir",
+                "/home",
+                "--bind",
+                self.workspace.to_str().ok_or("invalid workspace path")?,
+                "/work",
+                "--dir",
+                "/worker-home",
+                "--setenv",
+                "HOME",
+                "/worker-home",
+                "--chdir",
+                "/work",
+            ]);
+        if matches!(self.network, NetworkMode::RootOwnedLoopbackProxy { .. }) {
+            command.arg("--share-net");
+        }
+        for mount in &self.sandbox.runtime_mounts {
+            command.args([
+                "--ro-bind",
+                mount.to_str().ok_or("invalid runtime mount")?,
+                mount.to_str().ok_or("invalid runtime mount")?,
+            ]);
+        }
+        // The worker gets only the explicitly approved route variables.  There
+        // is no SSH agent, Docker socket, host HOME, or ambient credential.
+        for (key, value) in &self.environment {
+            command.args(["--setenv", key, value]);
+        }
+        command
+            .arg(&self.executable)
             .args([
                 "--bare",
                 "-p",

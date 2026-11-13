@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use super::provider::{Provider, ProviderConfidence, ProviderContext, ProviderResult};
 use super::schema::{NetworkAuthority, NodeKind, NodeSpec, Outcome, WorkspaceMode};
+use super::standing_policy::PolicyPermit;
 
 pub const CAPABILITY: &str = "agent.execute";
 
@@ -18,6 +19,9 @@ pub struct HeadlessProvider<'a> {
     /// This object cannot be enabled by a graph JSON property.
     pub worker: &'a WorkerConfig,
     pub cancelled: &'a AtomicBool,
+    /// Created by the protected supervisor-side standing-policy loader. A
+    /// worker cannot synthesize this permit from graph JSON or its worktree.
+    pub permit: &'a PolicyPermit,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +47,7 @@ impl Provider for HeadlessProvider<'_> {
         _context: &ProviderContext<'_>,
     ) -> Result<ProviderResult, String> {
         if capability != CAPABILITY
+            || node.id != self.permit.task_id
             || node.kind != NodeKind::Agent
             || node.workspace.mode != WorkspaceMode::Worktree
             || node.authority.git_commit
@@ -82,8 +87,10 @@ impl Provider for HeadlessProvider<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::standing_policy::PolicyPermit;
     use super::super::{compiler::compile, provider::ProviderRegistry, runner, schema::GraphSpec};
     use super::*;
+    use claudectl_core::headless::{NetworkMode, SandboxConfig};
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Duration};
 
     #[test]
@@ -93,18 +100,29 @@ mod tests {
         std::fs::write(&exe, "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[],\"session_id\":\"fake-1\",\"result\":\"untrusted prose\",\"total_cost_usd\":0.01}'\n").unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
         let worker = WorkerConfig {
-            executable: exe,
+            executable: exe.clone(),
             workspace: dir.path().canonicalize().unwrap(),
             environment: BTreeMap::new(),
             timeout: Duration::from_secs(2),
             max_output_bytes: 4096,
             max_turns: 2,
             budget_usd: 1.0,
+            network: NetworkMode::Deny,
+            sandbox: SandboxConfig {
+                executable: exe.clone(),
+                runtime_mounts: vec![std::path::PathBuf::from("/usr")],
+                worker_home: std::path::PathBuf::from("/tmp/druid-worker-home"),
+            },
         };
         let cancel = AtomicBool::new(false);
         let adapter = HeadlessProvider {
             worker: &worker,
             cancelled: &cancel,
+            permit: &PolicyPermit {
+                policy_id: "test".into(),
+                task_id: "candidate".into(),
+                repository_remote: "https://github.com/DryadAI/claudectl".into(),
+            },
         };
         let mut registry = ProviderRegistry::new();
         registry.register(&adapter);
@@ -148,6 +166,18 @@ mod tests {
         assert!(
             adapter
                 .execute(&denied, CAPABILITY, &serde_json::json!({}), &context)
+                .is_err()
+        );
+        let mut wrong_task = node.clone();
+        wrong_task.id = "worker-self-approved".into();
+        assert!(
+            adapter
+                .execute(
+                    &wrong_task,
+                    CAPABILITY,
+                    &serde_json::json!({"cwd":worker.workspace,"prompt":"x"}),
+                    &context
+                )
                 .is_err()
         );
         let empty = ProviderRegistry::new();

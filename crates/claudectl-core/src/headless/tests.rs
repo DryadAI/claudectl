@@ -15,16 +15,36 @@ fn fixture(script: &str) -> (Fixture, WorkerConfig) {
     let guard = FIXTURES.lock().unwrap_or_else(|error| error.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("fake-worker");
+    let sandbox = dir.path().join("fake-sandbox");
     std::fs::write(&exe, format!("#!/bin/sh\n{script}\n")).unwrap();
+    // Emulates only Bubblewrap's final exec for transport tests.  It is never
+    // used as an isolation claim; real activation requires /usr/bin/bwrap.
+    std::fs::write(
+        &sandbox,
+        format!(
+            "#!/bin/sh\nwhile [ \"$1\" != '{}' ]; do shift; done\nexec \"$@\"\n",
+            exe.display()
+        ),
+    )
+    .unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&sandbox, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = WorkerConfig {
-        executable: exe,
+        executable: exe.clone(),
         workspace: dir.path().to_owned(),
         environment: BTreeMap::new(),
         timeout: Duration::from_secs(2),
         max_output_bytes: 65536,
         max_turns: 3,
         budget_usd: 1.0,
+        network: NetworkMode::Deny,
+        sandbox: SandboxConfig {
+            // Tests inspect the launch contract only; fake-worker is never a
+            // usable sandbox outside this disposable fixture.
+            executable: sandbox,
+            runtime_mounts: vec![PathBuf::from("/usr")],
+            worker_home: PathBuf::from("/tmp/druid-worker-home"),
+        },
     };
     (
         Fixture {
@@ -44,6 +64,7 @@ fn fixed_argv_and_no_inherited_environment() {
     let (_dir, config) = fixture("exit 0");
     let command = config.command().unwrap();
     let args: Vec<_> = command.get_args().map(|v| v.to_str().unwrap()).collect();
+    assert!(args.contains(&"--unshare-all"));
     assert!(args.contains(&"--bare"));
     assert!(args.contains(&"dontAsk"));
     assert!(args.contains(&"--no-session-persistence"));
@@ -53,6 +74,33 @@ fn fixed_argv_and_no_inherited_environment() {
             .any(|v| v.contains("skip-permissions") || v.contains("Bash"))
     );
     assert_eq!(command.get_envs().count(), 0);
+    assert!(args.contains(&"--tmpfs"));
+    assert!(args.contains(&"/work"));
+}
+
+#[test]
+fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
+    let (_dir, mut config) = fixture("exit 0");
+    config.environment.insert("ANTHROPIC_API_KEY".into(), "forbidden".into());
+    assert!(config.command().is_err());
+    config.environment.clear();
+    config.network = NetworkMode::RootOwnedLoopbackProxy {
+        url: "http://127.0.0.1:18443".into(),
+    };
+    for (key, value) in [
+        ("HTTP_PROXY", "http://127.0.0.1:18443"),
+        ("HTTPS_PROXY", "http://127.0.0.1:18443"),
+        ("NO_PROXY", ""),
+        ("CLAUDE_CODE_PROXY_RESOLVES_HOSTS", "1"),
+        ("DISABLE_AUTOUPDATER", "1"),
+    ] {
+        config.environment.insert(key.into(), value.into());
+    }
+    let command = config.command().unwrap();
+    let args: Vec<_> = command.get_args().map(|value| value.to_str().unwrap()).collect();
+    assert!(args.contains(&"--share-net"));
+    config.environment.insert("NO_PROXY".into(), "localhost".into());
+    assert!(config.command().is_err());
 }
 
 #[test]
@@ -183,17 +231,24 @@ fn configuration_limits_and_environment_are_closed() {
 }
 
 #[test]
+fn sandbox_rejects_home_mounts_and_missing_runtime() {
+    let (_dir, mut config) = fixture("exit 0");
+    config.sandbox.runtime_mounts = vec![PathBuf::from("/home/katalyst")];
+    assert!(config.command().is_err());
+    config.sandbox.runtime_mounts.clear();
+    assert!(config.command().is_err());
+    config.sandbox.runtime_mounts = vec![PathBuf::from("/usr")];
+    config.sandbox.worker_home = PathBuf::from("/home/katalyst/worker");
+    assert!(config.command().is_err());
+}
+
+#[test]
 fn prompt_limits_and_missing_binary_fail_closed() {
     let (_dir, mut config) = fixture("exit 0");
     assert!(run(&config, "", &AtomicBool::new(false)).is_err());
     assert!(run(&config, &"x".repeat(32769), &AtomicBool::new(false)).is_err());
     config.executable = config.workspace.join("missing");
-    assert!(
-        run(&config, "x", &AtomicBool::new(false))
-            .err()
-            .unwrap()
-            .contains("spawn failed")
-    );
+    assert!(run(&config, "x", &AtomicBool::new(false)).is_err());
 }
 
 #[test]
