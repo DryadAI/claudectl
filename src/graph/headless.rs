@@ -3,7 +3,7 @@
 //! authenticated approval bridge are provisioned. No terminal-launch fallback.
 use std::sync::atomic::AtomicBool;
 
-use claudectl_core::headless::{SandboxConfig, WorkerConfig, run};
+use claudectl_core::headless::{WorkerConfig, run};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -90,6 +90,7 @@ mod tests {
     use super::super::standing_policy::PolicyPermit;
     use super::super::{compiler::compile, provider::ProviderRegistry, runner, schema::GraphSpec};
     use super::*;
+    use claudectl_core::headless::{NetworkMode, SandboxConfig};
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Duration};
 
     #[test]
@@ -106,6 +107,7 @@ mod tests {
             max_output_bytes: 4096,
             max_turns: 2,
             budget_usd: 1.0,
+            network: NetworkMode::Deny,
             sandbox: SandboxConfig {
                 executable: exe.clone(),
                 runtime_mounts: vec![std::path::PathBuf::from("/usr")],

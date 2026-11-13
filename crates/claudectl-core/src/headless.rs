@@ -19,9 +19,18 @@ pub struct WorkerConfig {
     pub max_output_bytes: usize,
     pub max_turns: u32,
     pub budget_usd: f64,
+    /// Trusted host egress configuration.  A graph and a worker never choose
+    /// this.  Proxy mode is usable only with a separately enforced host UID
+    /// egress-deny rule; otherwise Bubblewrap keeps its private network.
+    pub network: NetworkMode,
     /// Mandatory OS boundary.  This is deliberately trusted host input, not
     /// graph data: a worker cannot select a looser launcher or mount set.
     pub sandbox: SandboxConfig,
+}
+
+pub enum NetworkMode {
+    Deny,
+    RootOwnedLoopbackProxy { url: String },
 }
 
 /// Bubblewrap configuration for a development worker.  The launcher starts
@@ -62,7 +71,14 @@ impl WorkerConfig {
         if self.environment.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "HOME" | "PATH" | "TMPDIR" | "ANTHROPIC_API_KEY" | "ANTHROPIC_BASE_URL"
+                "HOME"
+                    | "PATH"
+                    | "TMPDIR"
+                    | "HTTP_PROXY"
+                    | "HTTPS_PROXY"
+                    | "NO_PROXY"
+                    | "CLAUDE_CODE_PROXY_RESOLVES_HOSTS"
+                    | "DISABLE_AUTOUPDATER"
             )
         }) {
             return Err("unsupported worker environment key".into());
@@ -75,6 +91,24 @@ impl WorkerConfig {
             })
         {
             return Err("invalid sandbox mount or worker home".into());
+        }
+        match &self.network {
+            NetworkMode::Deny if !self.environment.is_empty() => {
+                return Err("private-network worker may not receive route variables".into());
+            }
+            NetworkMode::Deny => {}
+            NetworkMode::RootOwnedLoopbackProxy { url }
+                if url != "http://127.0.0.1:18443"
+                    || self.environment.get("HTTP_PROXY") != Some(url)
+                    || self.environment.get("HTTPS_PROXY") != Some(url)
+                    || self.environment.get("NO_PROXY") != Some(&String::new())
+                    || self.environment.get("CLAUDE_CODE_PROXY_RESOLVES_HOSTS")
+                        != Some(&"1".to_owned())
+                    || self.environment.get("DISABLE_AUTOUPDATER") != Some(&"1".to_owned()) =>
+            {
+                return Err("invalid root-owned loopback proxy configuration".into());
+            }
+            NetworkMode::RootOwnedLoopbackProxy { .. } => {}
         }
         // No implicit PATH lookup, inherited credentials, resume, plugins, MCP, shell,
         // background tasks, or permission bypass. Bare mode requires a compatible CLI.
@@ -107,6 +141,9 @@ impl WorkerConfig {
                 "--chdir",
                 "/work",
             ]);
+        if matches!(self.network, NetworkMode::RootOwnedLoopbackProxy { .. }) {
+            command.arg("--share-net");
+        }
         for mount in &self.sandbox.runtime_mounts {
             command.args([
                 "--ro-bind",

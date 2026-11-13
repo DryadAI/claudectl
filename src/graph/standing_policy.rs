@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -144,7 +144,7 @@ fn protect(path: &Path, owner_uid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{os::unix::fs::PermissionsExt, path::PathBuf};
     use tempfile::tempdir;
 
     fn policy() -> StandingPolicy {

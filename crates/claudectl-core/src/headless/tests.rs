@@ -37,6 +37,7 @@ fn fixture(script: &str) -> (Fixture, WorkerConfig) {
         max_output_bytes: 65536,
         max_turns: 3,
         budget_usd: 1.0,
+        network: NetworkMode::Deny,
         sandbox: SandboxConfig {
             // Tests inspect the launch contract only; fake-worker is never a
             // usable sandbox outside this disposable fixture.
@@ -75,6 +76,31 @@ fn fixed_argv_and_no_inherited_environment() {
     assert_eq!(command.get_envs().count(), 0);
     assert!(args.contains(&"--tmpfs"));
     assert!(args.contains(&"/work"));
+}
+
+#[test]
+fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
+    let (_dir, mut config) = fixture("exit 0");
+    config.environment.insert("ANTHROPIC_API_KEY".into(), "forbidden".into());
+    assert!(config.command().is_err());
+    config.environment.clear();
+    config.network = NetworkMode::RootOwnedLoopbackProxy {
+        url: "http://127.0.0.1:18443".into(),
+    };
+    for (key, value) in [
+        ("HTTP_PROXY", "http://127.0.0.1:18443"),
+        ("HTTPS_PROXY", "http://127.0.0.1:18443"),
+        ("NO_PROXY", ""),
+        ("CLAUDE_CODE_PROXY_RESOLVES_HOSTS", "1"),
+        ("DISABLE_AUTOUPDATER", "1"),
+    ] {
+        config.environment.insert(key.into(), value.into());
+    }
+    let command = config.command().unwrap();
+    let args: Vec<_> = command.get_args().map(|value| value.to_str().unwrap()).collect();
+    assert!(args.contains(&"--share-net"));
+    config.environment.insert("NO_PROXY".into(), "localhost".into());
+    assert!(config.command().is_err());
 }
 
 #[test]
