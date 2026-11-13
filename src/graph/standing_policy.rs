@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct StandingPolicy {
     pub policy_id: String,
     pub status: PolicyStatus,
