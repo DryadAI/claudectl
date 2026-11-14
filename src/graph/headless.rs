@@ -102,6 +102,8 @@ mod tests {
         let worker = WorkerConfig {
             executable: exe.clone(),
             workspace: dir.path().canonicalize().unwrap(),
+            run_as_uid: unsafe { libc::geteuid() },
+            run_as_gid: unsafe { libc::getegid() },
             environment: BTreeMap::new(),
             timeout: Duration::from_secs(2),
             max_output_bytes: 4096,

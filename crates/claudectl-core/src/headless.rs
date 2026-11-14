@@ -14,6 +14,11 @@ use std::time::{Duration, Instant};
 pub struct WorkerConfig {
     pub executable: PathBuf,
     pub workspace: PathBuf,
+    /// Host UID/GID for the actual sandbox launcher process. A root-owned
+    /// durable supervisor must drop to this identity before Bubblewrap starts;
+    /// proxy nftables rules are keyed to this host UID, not a namespace UID.
+    pub run_as_uid: u32,
+    pub run_as_gid: u32,
     pub environment: BTreeMap<String, String>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
@@ -55,6 +60,8 @@ impl WorkerConfig {
         if !self.executable.is_absolute()
             || !self.workspace.is_absolute()
             || !self.workspace.is_dir()
+            || self.run_as_uid == 0
+            || self.run_as_gid == 0
             || self.timeout.is_zero()
             || self.timeout > Duration::from_secs(3600)
             || !(1..=1_048_576).contains(&self.max_output_bytes)
@@ -67,6 +74,10 @@ impl WorkerConfig {
             || self.sandbox.runtime_mounts.is_empty()
         {
             return Err("invalid trusted worker configuration".into());
+        }
+        let effective_uid = unsafe { libc::geteuid() };
+        if effective_uid != 0 && effective_uid != self.run_as_uid {
+            return Err("supervisor cannot establish required worker identity".into());
         }
         if self.environment.keys().any(|key| {
             !matches!(
@@ -115,6 +126,8 @@ impl WorkerConfig {
         let mut command = Command::new(&self.sandbox.executable);
         command
             .env_clear()
+            .uid(self.run_as_uid)
+            .gid(self.run_as_gid)
             // Bubblewrap immediately chdirs to /work; setting the wrapper cwd
             // also lets a launcher resolve its initial directory without HOME.
             .current_dir(&self.workspace)

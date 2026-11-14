@@ -32,6 +32,8 @@ fn fixture(script: &str) -> (Fixture, WorkerConfig) {
     let config = WorkerConfig {
         executable: exe.clone(),
         workspace: dir.path().to_owned(),
+        run_as_uid: unsafe { libc::geteuid() },
+        run_as_gid: unsafe { libc::getegid() },
         environment: BTreeMap::new(),
         timeout: Duration::from_secs(2),
         max_output_bytes: 65536,
@@ -101,6 +103,30 @@ fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
     assert!(args.contains(&"--share-net"));
     config.environment.insert("NO_PROXY".into(), "localhost".into());
     assert!(config.command().is_err());
+}
+
+#[test]
+fn non_root_supervisor_cannot_impersonate_a_different_worker() {
+    let (_dir, mut config) = fixture("exit 0");
+    if unsafe { libc::geteuid() } != 0 {
+        config.run_as_uid = config.run_as_uid.saturating_add(1);
+        assert!(config.command().is_err());
+    }
+    config.run_as_uid = 0;
+    assert!(config.command().is_err());
+}
+
+#[test]
+fn worker_process_uses_the_configured_host_identity() {
+    let (_dir, config) = fixture(&format!(
+        "/bin/cat >/dev/null; /usr/bin/id -u > worker_uid; printf '%s' '{}'",
+        success()
+    ));
+    run(&config, "x", &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(config.workspace.join("worker_uid")).unwrap().trim(),
+        config.run_as_uid.to_string()
+    );
 }
 
 #[test]
