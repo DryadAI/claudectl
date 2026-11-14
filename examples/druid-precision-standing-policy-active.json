@@ -14,5 +14,8 @@
     "max_concurrency": 1,
     "max_retries": 2
   },
-  "fresh_human_approval_required": ["deploy", "production-network", "credential-change", "firewall-change", "privilege-change", "merge", "paid-api", "non-approved-egress"]
+  "fresh_human_approval_required": ["deploy", "production-network", "credential-change", "firewall-change", "privilege-change", "merge", "paid-api", "non-approved-egress"],
+  "identity": {"required_uid": "druid-worker", "no_sudo": true, "no_docker_socket": true, "no_ssh_agent": true, "home": "ephemeral"},
+  "sandbox": {"launcher": "/usr/bin/bwrap", "network": "deny", "writable_mounts": ["/work"], "runtime_mounts": ["/usr", "/bin", "/lib", "/lib64", "/etc/ssl/certs"], "required": true},
+  "credentials": {"allowed": ["explicit-approved-local-route"], "forbidden": ["host-home", "ssh-agent", "docker-socket", "browser-session", "paid-api-fallback"]}
 }

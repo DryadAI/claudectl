@@ -20,6 +20,36 @@ pub struct StandingPolicy {
     pub repositories: Vec<RepositoryGrant>,
     pub limits: Limits,
     pub fresh_human_approval_required: Vec<String>,
+    pub identity: WorkerIdentity,
+    pub sandbox: SandboxPolicy,
+    pub credentials: CredentialScope,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerIdentity {
+    pub required_uid: String,
+    pub no_sudo: bool,
+    pub no_docker_socket: bool,
+    pub no_ssh_agent: bool,
+    pub home: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxPolicy {
+    pub launcher: String,
+    pub network: String,
+    pub writable_mounts: Vec<String>,
+    pub runtime_mounts: Vec<String>,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialScope {
+    pub allowed: Vec<String>,
+    pub forbidden: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -115,6 +145,39 @@ pub fn authorize(
     {
         return Err("invalid standing-policy limits".into());
     }
+    if policy.identity.required_uid != "druid-worker"
+        || !policy.identity.no_sudo
+        || !policy.identity.no_docker_socket
+        || !policy.identity.no_ssh_agent
+        || policy.identity.home != "ephemeral"
+    {
+        return Err("standing policy does not require the bounded worker identity".into());
+    }
+    if policy.sandbox.launcher != "/usr/bin/bwrap"
+        || policy.sandbox.network != "deny"
+        || policy.sandbox.writable_mounts != ["/work"]
+        || policy.sandbox.runtime_mounts.iter().any(|mount| {
+            !matches!(mount.as_str(), "/usr" | "/bin" | "/lib" | "/lib64" | "/etc/ssl/certs")
+        })
+        || policy.sandbox.runtime_mounts.is_empty()
+        || !policy.sandbox.required
+    {
+        return Err("standing policy does not require the bounded Bubblewrap sandbox".into());
+    }
+    let required_forbidden = [
+        "host-home",
+        "ssh-agent",
+        "docker-socket",
+        "browser-session",
+        "paid-api-fallback",
+    ];
+    if policy.credentials.allowed != ["explicit-approved-local-route"]
+        || required_forbidden
+            .iter()
+            .any(|value| !policy.credentials.forbidden.iter().any(|found| found == value))
+    {
+        return Err("standing policy has an unbounded credential route".into());
+    }
     Ok((
         policy.clone(),
         PolicyPermit {
@@ -165,6 +228,30 @@ mod tests {
                 max_retries: 0,
             },
             fresh_human_approval_required: vec!["merge".into(), "deploy".into()],
+            identity: WorkerIdentity {
+                required_uid: "druid-worker".into(),
+                no_sudo: true,
+                no_docker_socket: true,
+                no_ssh_agent: true,
+                home: "ephemeral".into(),
+            },
+            sandbox: SandboxPolicy {
+                launcher: "/usr/bin/bwrap".into(),
+                network: "deny".into(),
+                writable_mounts: vec!["/work".into()],
+                runtime_mounts: vec!["/usr".into()],
+                required: true,
+            },
+            credentials: CredentialScope {
+                allowed: vec!["explicit-approved-local-route".into()],
+                forbidden: vec![
+                    "host-home".into(),
+                    "ssh-agent".into(),
+                    "docker-socket".into(),
+                    "browser-session".into(),
+                    "paid-api-fallback".into(),
+                ],
+            },
         }
     }
     fn write_authority(
@@ -272,5 +359,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn identity_sandbox_and_credential_weakening_fail_closed() {
+        let d = tempdir().unwrap();
+        for mutation in ["identity", "sandbox", "credentials"] {
+            let mut candidate = policy();
+            match mutation {
+                "identity" => candidate.identity.no_sudo = false,
+                "sandbox" => candidate.sandbox.network = "allow".into(),
+                "credentials" => candidate.credentials.forbidden.clear(),
+                _ => unreachable!(),
+            }
+            let (p, r) = write_authority(d.path(), &candidate, &Revocations::default());
+            let uid = fs::metadata(&p).unwrap().uid();
+            assert!(authorize(
+                &p,
+                &r,
+                uid,
+                99,
+                "task-1",
+                "https://github.com/DryadAI/claudectl",
+                "edit"
+            )
+            .is_err(), "{mutation} weakening must fail closed");
+        }
     }
 }
