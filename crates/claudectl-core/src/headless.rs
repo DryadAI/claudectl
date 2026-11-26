@@ -6,6 +6,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -31,7 +32,32 @@ pub struct WorkerConfig {
     /// Mandatory OS boundary.  This is deliberately trusted host input, not
     /// graph data: a worker cannot select a looser launcher or mount set.
     pub sandbox: SandboxConfig,
+    /// A protected host choice. Production providers must require this;
+    /// direct Bubblewrap remains available only to offline transport tests.
+    pub resources: Option<ResourceLimits>,
 }
+
+/// Per-attempt cgroup limits applied by the system service manager before exec.
+/// These values are not graph/model input.
+pub struct ResourceLimits {
+    pub memory_max_bytes: u64,
+    pub tasks_max: u32,
+    pub cpu_quota_percent: u32,
+}
+
+impl ResourceLimits {
+    fn validate(&self) -> Result<(), String> {
+        if !(64 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&self.memory_max_bytes)
+            || !(8..=128).contains(&self.tasks_max)
+            || !(1..=100).contains(&self.cpu_quota_percent)
+        {
+            return Err("invalid worker resource limits".into());
+        }
+        Ok(())
+    }
+}
+
+static NEXT_UNIT: AtomicU64 = AtomicU64::new(0);
 
 pub enum NetworkMode {
     Deny,
@@ -135,6 +161,7 @@ impl WorkerConfig {
                 "--unshare-all",
                 "--die-with-parent",
                 "--new-session",
+                "--clearenv",
                 "--proc",
                 "/proc",
                 "--dev",
@@ -194,9 +221,78 @@ impl WorkerConfig {
             .process_group(0);
         Ok(command)
     }
+
+    fn launch_command(&self) -> Result<(Command, Option<String>), String> {
+        let sandbox = self.command()?;
+        let Some(resources) = &self.resources else {
+            return Ok((sandbox, None));
+        };
+        resources.validate()?;
+        if unsafe { libc::geteuid() } != 0 {
+            return Err("resource-limited worker requires root supervisor".into());
+        }
+        let unit = format!(
+            "druid-worker-{}-{}.service",
+            std::process::id(),
+            NEXT_UNIT.fetch_add(1, Ordering::Relaxed)
+        );
+        Ok((self.systemd_command(sandbox, resources, &unit), Some(unit)))
+    }
+
+    fn systemd_command(&self, sandbox: Command, resources: &ResourceLimits, unit: &str) -> Command {
+        let mut command = Command::new("/usr/bin/systemd-run");
+        command
+            .env_clear()
+            .args([
+                "--system",
+                "--no-ask-password",
+                "--pipe",
+                "--quiet",
+                "--collect",
+                "--service-type=exec",
+                "--expand-environment=no",
+                "--property=KillMode=control-group",
+                "--property=TimeoutStopSec=3s",
+            ])
+            .arg(format!("--unit={unit}"))
+            .arg(format!("--working-directory={}", self.workspace.display()))
+            .arg(format!(
+                "--property=MemoryMax={}",
+                resources.memory_max_bytes
+            ))
+            .arg(format!("--property=TasksMax={}", resources.tasks_max))
+            .arg(format!(
+                "--property=CPUQuota={}%",
+                resources.cpu_quota_percent
+            ))
+            .arg(format!(
+                "--property=RuntimeMaxSec={}s",
+                self.timeout.as_secs_f64().ceil() as u64
+            ))
+            // systemd User= would restore NSS supplementary groups. A root
+            // service instead drops UID, GID, all groups, and capabilities
+            // before the sandbox launcher, while retaining cgroup placement.
+            .args([
+                "/usr/bin/setpriv",
+                "--no-new-privs",
+                "--clear-groups",
+                "--bounding-set=-all",
+                "--inh-caps=-all",
+                "--ambient-caps=-all",
+            ])
+            .arg(format!("--reuid={}", self.run_as_uid))
+            .arg(format!("--regid={}", self.run_as_gid))
+            .arg(sandbox.get_program())
+            .args(sandbox.get_args())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        command
+    }
 }
 
-struct Process(Child, bool);
+struct Process(Child, bool, Option<String>);
 impl Process {
     fn stop_group(&mut self) {
         if self.1 {
@@ -207,6 +303,19 @@ impl Process {
         // an external cgroup/container boundary; this is not hostile-code isolation.
         unsafe {
             libc::kill(-(self.0.id() as i32), libc::SIGKILL);
+        }
+        if let Some(unit) = &self.2 {
+            // Detached descendants are owned by the transient service, not
+            // the wrapper's process group. RuntimeMaxSec is a second backstop.
+            let stopped = Command::new("/usr/bin/systemctl")
+                .env_clear()
+                .args(["--system", "--no-ask-password", "stop", "--", unit])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if !stopped.is_ok_and(|status| status.success()) {
+                eprintln!("worker unit stop could not be confirmed");
+            }
         }
     }
 }
@@ -240,12 +349,13 @@ pub fn run(
     if cancel.load(Ordering::SeqCst) {
         return Err("worker cancelled".into());
     }
+    let (mut command, unit) = config.launch_command()?;
     let mut process = Process(
-        config
-            .command()?
+        command
             .spawn()
             .map_err(|error| format!("worker spawn failed (os code {:?})", error.raw_os_error()))?,
         false,
+        unit,
     );
     let mut input = process.0.stdin.take();
     let mut stdout = process.0.stdout.take().ok_or("missing worker stdout")?;
@@ -300,6 +410,9 @@ pub fn run(
         if status.is_none() {
             status = process.0.try_wait().map_err(|_| "worker wait failed")?;
             if status.is_some() {
+                // With --pipe the service has finished before systemd-run
+                // exits; systemd's KillMode handles remaining descendants.
+                process.2 = None;
                 process.stop_group();
             }
         }

@@ -127,6 +127,9 @@ impl Provider for HeadlessProvider<'_> {
         {
             return Err("headless worker exceeds protected standing-policy limits".into());
         }
+        if !cfg!(test) && self.worker.resources.is_none() {
+            return Err("headless worker requires a host resource boundary".into());
+        }
         let request: Request = serde_json::from_value(request.clone())
             .map_err(|_| "invalid headless request; only cwd and prompt are supported")?;
         // The host selects one exact pre-isolated workspace, not a user-selected
@@ -182,6 +185,7 @@ mod tests {
             max_turns: 2,
             budget_usd: 1.0,
             network: NetworkMode::Deny,
+            resources: None,
             sandbox: SandboxConfig {
                 executable: exe.clone(),
                 runtime_mounts: vec![std::path::PathBuf::from("/usr")],

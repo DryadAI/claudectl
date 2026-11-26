@@ -47,6 +47,7 @@ fn fixture(script: &str) -> (Fixture, WorkerConfig) {
             runtime_mounts: vec![PathBuf::from("/usr")],
             worker_home: PathBuf::from("/tmp/druid-worker-home"),
         },
+        resources: None,
     };
     (
         Fixture {
@@ -77,13 +78,93 @@ fn fixed_argv_and_no_inherited_environment() {
     );
     assert_eq!(command.get_envs().count(), 0);
     assert!(args.contains(&"--tmpfs"));
+    assert!(args.contains(&"--clearenv"));
     assert!(args.contains(&"/work"));
+}
+
+#[test]
+fn resource_contract_is_bounded_and_transient_service_is_exact() {
+    let (_dir, mut config) = fixture("exit 0");
+    let resources = ResourceLimits {
+        memory_max_bytes: 512 * 1024 * 1024,
+        tasks_max: 32,
+        cpu_quota_percent: 50,
+    };
+    resources.validate().unwrap();
+    let command =
+        config.systemd_command(config.command().unwrap(), &resources, "druid-test.service");
+    assert_eq!(command.get_program(), "/usr/bin/systemd-run");
+    let args: Vec<_> = command
+        .get_args()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    for required in [
+        "--system",
+        "--pipe",
+        "--collect",
+        "--service-type=exec",
+        "--property=KillMode=control-group",
+        "--property=TimeoutStopSec=3s",
+        "--property=MemoryMax=536870912",
+        "--property=TasksMax=32",
+        "--property=CPUQuota=50%",
+        "--property=RuntimeMaxSec=2s",
+        "--unit=druid-test.service",
+        "--expand-environment=no",
+        "--clearenv",
+        "/usr/bin/setpriv",
+        "--clear-groups",
+        "--bounding-set=-all",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+    ] {
+        assert!(args.contains(&required), "missing {required}");
+    }
+    assert!(args.contains(&"--unshare-all"));
+    assert!(args.contains(&format!("--reuid={}", config.run_as_uid).as_str()));
+    assert!(args.contains(&format!("--regid={}", config.run_as_gid).as_str()));
+    assert!(
+        !args
+            .iter()
+            .any(|value| value.starts_with("--uid=") || value.starts_with("--gid="))
+    );
+    assert_eq!(command.get_envs().count(), 0);
+    config.resources = Some(resources);
+    if unsafe { libc::geteuid() } != 0 {
+        assert!(
+            config
+                .launch_command()
+                .unwrap_err()
+                .contains("root supervisor")
+        );
+    }
+    for invalid in [
+        ResourceLimits {
+            memory_max_bytes: 0,
+            tasks_max: 32,
+            cpu_quota_percent: 50,
+        },
+        ResourceLimits {
+            memory_max_bytes: 512 * 1024 * 1024,
+            tasks_max: 0,
+            cpu_quota_percent: 50,
+        },
+        ResourceLimits {
+            memory_max_bytes: 512 * 1024 * 1024,
+            tasks_max: 32,
+            cpu_quota_percent: 101,
+        },
+    ] {
+        assert!(invalid.validate().is_err());
+    }
 }
 
 #[test]
 fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
     let (_dir, mut config) = fixture("exit 0");
-    config.environment.insert("ANTHROPIC_API_KEY".into(), "forbidden".into());
+    config
+        .environment
+        .insert("ANTHROPIC_API_KEY".into(), "forbidden".into());
     assert!(config.command().is_err());
     config.environment.clear();
     config.network = NetworkMode::RootOwnedLoopbackProxy {
@@ -99,9 +180,14 @@ fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
         config.environment.insert(key.into(), value.into());
     }
     let command = config.command().unwrap();
-    let args: Vec<_> = command.get_args().map(|value| value.to_str().unwrap()).collect();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|value| value.to_str().unwrap())
+        .collect();
     assert!(args.contains(&"--share-net"));
-    config.environment.insert("NO_PROXY".into(), "localhost".into());
+    config
+        .environment
+        .insert("NO_PROXY".into(), "localhost".into());
     assert!(config.command().is_err());
 }
 
@@ -124,7 +210,9 @@ fn worker_process_uses_the_configured_host_identity() {
     ));
     run(&config, "x", &AtomicBool::new(false)).unwrap();
     assert_eq!(
-        std::fs::read_to_string(config.workspace.join("worker_uid")).unwrap().trim(),
+        std::fs::read_to_string(config.workspace.join("worker_uid"))
+            .unwrap()
+            .trim(),
         config.run_as_uid.to_string()
     );
 }
