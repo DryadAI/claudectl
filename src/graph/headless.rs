@@ -119,6 +119,14 @@ impl Provider for HeadlessProvider<'_> {
                 "headless worker route differs from protected standing-policy permit".into(),
             );
         }
+        let bounds = self.permit.execution_bounds;
+        if self.worker.timeout > std::time::Duration::from_secs(bounds.timeout_seconds)
+            || self.worker.max_output_bytes > bounds.max_output_bytes
+            || self.worker.max_turns > bounds.max_turns
+            || self.worker.budget_usd > bounds.max_budget_usd
+        {
+            return Err("headless worker exceeds protected standing-policy limits".into());
+        }
         let request: Request = serde_json::from_value(request.clone())
             .map_err(|_| "invalid headless request; only cwd and prompt are supported")?;
         // The host selects one exact pre-isolated workspace, not a user-selected
@@ -151,7 +159,7 @@ impl Provider for HeadlessProvider<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::standing_policy::PolicyPermit;
+    use super::super::standing_policy::{PermitExecutionBounds, PolicyPermit};
     use super::super::{compiler::compile, provider::ProviderRegistry, runner, schema::GraphSpec};
     use super::*;
     use claudectl_core::headless::SandboxConfig;
@@ -189,6 +197,12 @@ mod tests {
                 task_id: "candidate".into(),
                 repository_remote: "https://github.com/DryadAI/claudectl".into(),
                 route: PermitRoute::Offline,
+                execution_bounds: PermitExecutionBounds {
+                    timeout_seconds: 2,
+                    max_output_bytes: 4096,
+                    max_turns: 2,
+                    max_budget_usd: 1.0,
+                },
             },
         };
         let mut registry = ProviderRegistry::new();
@@ -252,6 +266,7 @@ mod tests {
             task_id: node.id.clone(),
             repository_remote: "https://github.com/DryadAI/claudectl".into(),
             route: PermitRoute::RootOwnedLoopbackProxy,
+            execution_bounds: adapter.permit.execution_bounds,
         };
         let mismatched_adapter = HeadlessProvider {
             worker: &worker,
@@ -268,6 +283,42 @@ mod tests {
                 )
                 .is_err()
         );
+        for tighter in [
+            PermitExecutionBounds {
+                timeout_seconds: 1,
+                ..adapter.permit.execution_bounds
+            },
+            PermitExecutionBounds {
+                max_output_bytes: 4095,
+                ..adapter.permit.execution_bounds
+            },
+            PermitExecutionBounds {
+                max_turns: 1,
+                ..adapter.permit.execution_bounds
+            },
+            PermitExecutionBounds {
+                max_budget_usd: 0.5,
+                ..adapter.permit.execution_bounds
+            },
+        ] {
+            let mut narrowed = (*adapter.permit).clone();
+            narrowed.execution_bounds = tighter;
+            let limited_adapter = HeadlessProvider {
+                worker: &worker,
+                cancelled: &cancel,
+                permit: &narrowed,
+            };
+            assert!(
+                limited_adapter
+                    .execute(
+                        node,
+                        CAPABILITY,
+                        &serde_json::json!({"cwd":worker.workspace,"prompt":"x"}),
+                        &context
+                    )
+                    .is_err()
+            );
+        }
         let empty = ProviderRegistry::new();
         let report =
             runner::run_with_registry(&compiled, &empty, &dir.path().join("unconfigured")).unwrap();

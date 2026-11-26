@@ -9,7 +9,10 @@ with `proxy_url = http://127.0.0.1:18443`, the single subscription route label,
 and an explicit API-key prohibition. Other restricted credentials and operations
 remain denied. Offline policy continues to require its original route and no
 proxy URL. A permit carries the authorized route to the headless adapter, which
-refuses a mismatched worker configuration.
+refuses a mismatched worker configuration. It also carries the policy's timeout,
+output, turn, and CLI budget ceilings; the adapter rejects a worker configured
+above any of them. Concurrency and retry limits still require supervisor-side
+enforcement and remain part of the activation gate.
 
 Immediately before a proxy-mode launch, a root supervisor must verify the
 protected root-owned firewall loader, its exact rule set, and both required

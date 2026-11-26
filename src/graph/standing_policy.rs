@@ -93,18 +93,28 @@ pub struct Revocations {
 /// A permit is short-lived, bound to one task and only constructible after all
 /// supervisor-owned checks have passed.  It must be retained with the durable
 /// task/attempt evidence, never written in the worktree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PolicyPermit {
     pub policy_id: String,
     pub task_id: String,
     pub repository_remote: String,
     pub route: PermitRoute,
+    pub execution_bounds: PermitExecutionBounds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermitRoute {
     Offline,
     RootOwnedLoopbackProxy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PermitExecutionBounds {
+    pub timeout_seconds: u64,
+    pub max_output_bytes: usize,
+    pub max_turns: u32,
+    /// CLI per-run ceiling; never authorization to use a paid API.
+    pub max_budget_usd: f64,
 }
 
 pub fn authorize(
@@ -147,11 +157,15 @@ pub fn authorize(
         return Err("operation requires fresh human approval or is not granted".into());
     }
     if policy.limits.timeout_seconds == 0
+        || policy.limits.timeout_seconds > 3600
         || policy.limits.max_output_bytes == 0
+        || policy.limits.max_output_bytes > 1_048_576
         || policy.limits.max_turns == 0
+        || policy.limits.max_turns > 100
         || policy.limits.max_concurrency == 0
         || policy.limits.max_budget_usd <= 0.0
         || !policy.limits.max_budget_usd.is_finite()
+        || policy.limits.max_budget_usd > 100.0
     {
         return Err("invalid standing-policy limits".into());
     }
@@ -218,6 +232,12 @@ pub fn authorize(
             task_id: task_id.into(),
             repository_remote: repository_remote.into(),
             route,
+            execution_bounds: PermitExecutionBounds {
+                timeout_seconds: policy.limits.timeout_seconds,
+                max_output_bytes: policy.limits.max_output_bytes,
+                max_turns: policy.limits.max_turns,
+                max_budget_usd: policy.limits.max_budget_usd,
+            },
         },
     ))
 }
@@ -319,6 +339,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(permit.task_id, "task-1");
+        assert_eq!(permit.execution_bounds.max_turns, 1);
         assert!(
             authorize(
                 &p,
@@ -515,5 +536,35 @@ mod tests {
         let mut value = serde_json::to_value(policy()).unwrap();
         value["sandbox_overrides"] = serde_json::json!({"network": "allow"});
         assert!(serde_json::from_value::<StandingPolicy>(value).is_err());
+    }
+
+    #[test]
+    fn policy_cannot_claim_limits_above_transport_ceiling() {
+        let d = tempdir().unwrap();
+        for field in ["timeout", "output", "turns", "budget"] {
+            let mut candidate = policy();
+            match field {
+                "timeout" => candidate.limits.timeout_seconds = 3601,
+                "output" => candidate.limits.max_output_bytes = 1_048_577,
+                "turns" => candidate.limits.max_turns = 101,
+                "budget" => candidate.limits.max_budget_usd = 100.01,
+                _ => unreachable!(),
+            }
+            let (p, r) = write_authority(d.path(), &candidate, &Revocations::default());
+            let uid = fs::metadata(&p).unwrap().uid();
+            assert!(
+                authorize(
+                    &p,
+                    &r,
+                    uid,
+                    99,
+                    "task-1",
+                    "https://github.com/DryadAI/claudectl",
+                    "edit"
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
     }
 }
