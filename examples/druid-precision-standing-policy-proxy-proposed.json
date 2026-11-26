@@ -1,0 +1,31 @@
+{
+  "policy_id": "druid-precision-proxy-proposed-v1",
+  "status": "inactive-until-host-sandbox-probe-passes",
+  "expires_at_unix_ms": 1798761600000,
+  "repositories": [{
+    "remote": "https://github.com/DryadAI/claudectl",
+    "operations": ["read", "branch", "worktree", "edit", "test", "commit", "push-review-branch"]
+  }],
+  "limits": {
+    "timeout_seconds": 3600,
+    "max_output_bytes": 1048576,
+    "max_turns": 100,
+    "max_budget_usd": 100,
+    "max_concurrency": 1,
+    "max_retries": 2
+  },
+  "fresh_human_approval_required": ["deploy", "production-network", "credential-change", "firewall-change", "privilege-change", "merge", "paid-api", "non-approved-egress"],
+  "identity": {"required_uid": "druid-worker", "no_sudo": true, "no_docker_socket": true, "no_ssh_agent": true, "home": "ephemeral"},
+  "sandbox": {
+    "launcher": "/usr/bin/bwrap",
+    "network": "root-owned-loopback-proxy",
+    "proxy_url": "http://127.0.0.1:18443",
+    "writable_mounts": ["/work"],
+    "runtime_mounts": ["/usr", "/bin", "/lib", "/lib64", "/etc/ssl/certs"],
+    "required": true
+  },
+  "credentials": {
+    "allowed": ["user-approved-first-party-claude-subscription"],
+    "forbidden": ["host-home", "ssh-agent", "docker-socket", "browser-session", "api-key", "paid-api-fallback"]
+  }
+}

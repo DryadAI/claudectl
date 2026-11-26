@@ -26,9 +26,10 @@ The transport invokes an absolute binary without a shell. Prompt bytes travel on
 stdin, not argv. Fixed flags request `--bare -p`, JSON, no session persistence,
 Read/Edit/Write tools only, `dontAsk`, max turns and max budget. No Bash, arbitrary
 extra flags, automatic resume, plugin/MCP discovery or permission bypass is exposed.
-Only explicitly provided HOME/PATH/TMPDIR/API key/base URL variables are accepted;
-the process inherits no environment. These values must point to a dedicated
-worker context, never a user's administrator home. No real credentials are copied.
+Only the bounded HOME/PATH/TMPDIR and exact proxy variables are accepted;
+API keys and base URL overrides are rejected. The process inherits no environment.
+No real credentials are copied. An isolated worker subscription login has not
+been proved by these tests.
 
 Nonblocking pipe reads/writes bound the entire attempt, including blocked stdin.
 Combined stdout/stderr is capped at at most 1 MiB. stderr is discarded after
@@ -64,10 +65,13 @@ separate verifier/artifact collection before acceptance.
 
 The current [headless documentation](https://code.claude.com/docs/en/headless)
 and [CLI reference](https://code.claude.com/docs/en/cli-reference) describe these
-flags. Pin and test the actual installed version before activation. Bare mode
-uses API/provider credentials rather than subscription OAuth; do not assume a
-Claude subscription funds this backend. Authentication/billing and the approved
-Bifrost route require an operator decision and a bounded smoke test.
+flags. Pin and test the actual installed version before activation. Do not
+assume a Claude subscription funds this backend. Authentication and billing
+under the isolated worker identity require a separate operator review and
+bounded smoke test. The [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance)
+allows an end user to sign in to the unmodified Claude Code binary with their
+own subscription, while placing conditions on integrations and credential
+handling. This adapter does not collect or inject subscription tokens.
 
 Before production registration: establish separate unprivileged worker identity,
 protected authority and sandbox; bind exact artifacts and workspace to approved

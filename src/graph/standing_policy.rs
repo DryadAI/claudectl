@@ -13,6 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StandingPolicy {
     pub policy_id: String,
     pub status: PolicyStatus,
@@ -40,6 +41,8 @@ pub struct WorkerIdentity {
 pub struct SandboxPolicy {
     pub launcher: String,
     pub network: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
     pub writable_mounts: Vec<String>,
     pub runtime_mounts: Vec<String>,
     pub required: bool,
@@ -90,11 +93,28 @@ pub struct Revocations {
 /// A permit is short-lived, bound to one task and only constructible after all
 /// supervisor-owned checks have passed.  It must be retained with the durable
 /// task/attempt evidence, never written in the worktree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PolicyPermit {
     pub policy_id: String,
     pub task_id: String,
     pub repository_remote: String,
+    pub route: PermitRoute,
+    pub execution_bounds: PermitExecutionBounds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermitRoute {
+    Offline,
+    RootOwnedLoopbackProxy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PermitExecutionBounds {
+    pub timeout_seconds: u64,
+    pub max_output_bytes: usize,
+    pub max_turns: u32,
+    /// CLI per-run ceiling; never authorization to use a paid API.
+    pub max_budget_usd: f64,
 }
 
 pub fn authorize(
@@ -137,11 +157,15 @@ pub fn authorize(
         return Err("operation requires fresh human approval or is not granted".into());
     }
     if policy.limits.timeout_seconds == 0
+        || policy.limits.timeout_seconds > 3600
         || policy.limits.max_output_bytes == 0
+        || policy.limits.max_output_bytes > 1_048_576
         || policy.limits.max_turns == 0
+        || policy.limits.max_turns > 100
         || policy.limits.max_concurrency == 0
         || policy.limits.max_budget_usd <= 0.0
         || !policy.limits.max_budget_usd.is_finite()
+        || policy.limits.max_budget_usd > 100.0
     {
         return Err("invalid standing-policy limits".into());
     }
@@ -153,11 +177,32 @@ pub fn authorize(
     {
         return Err("standing policy does not require the bounded worker identity".into());
     }
+    let route = match (
+        policy.sandbox.network.as_str(),
+        policy.sandbox.proxy_url.as_deref(),
+    ) {
+        ("deny", None) if policy.credentials.allowed == ["explicit-approved-local-route"] => {
+            PermitRoute::Offline
+        }
+        ("root-owned-loopback-proxy", Some("http://127.0.0.1:18443"))
+            if policy.credentials.allowed == ["user-approved-first-party-claude-subscription"]
+                && policy
+                    .credentials
+                    .forbidden
+                    .iter()
+                    .any(|value| value == "api-key") =>
+        {
+            PermitRoute::RootOwnedLoopbackProxy
+        }
+        _ => return Err("standing policy has an unapproved network or credential route".into()),
+    };
     if policy.sandbox.launcher != "/usr/bin/bwrap"
-        || policy.sandbox.network != "deny"
         || policy.sandbox.writable_mounts != ["/work"]
         || policy.sandbox.runtime_mounts.iter().any(|mount| {
-            !matches!(mount.as_str(), "/usr" | "/bin" | "/lib" | "/lib64" | "/etc/ssl/certs")
+            !matches!(
+                mount.as_str(),
+                "/usr" | "/bin" | "/lib" | "/lib64" | "/etc/ssl/certs"
+            )
         })
         || policy.sandbox.runtime_mounts.is_empty()
         || !policy.sandbox.required
@@ -171,11 +216,13 @@ pub fn authorize(
         "browser-session",
         "paid-api-fallback",
     ];
-    if policy.credentials.allowed != ["explicit-approved-local-route"]
-        || required_forbidden
+    if required_forbidden.iter().any(|value| {
+        !policy
+            .credentials
+            .forbidden
             .iter()
-            .any(|value| !policy.credentials.forbidden.iter().any(|found| found == value))
-    {
+            .any(|found| found == value)
+    }) {
         return Err("standing policy has an unbounded credential route".into());
     }
     Ok((
@@ -184,6 +231,13 @@ pub fn authorize(
             policy_id: policy.policy_id,
             task_id: task_id.into(),
             repository_remote: repository_remote.into(),
+            route,
+            execution_bounds: PermitExecutionBounds {
+                timeout_seconds: policy.limits.timeout_seconds,
+                max_output_bytes: policy.limits.max_output_bytes,
+                max_turns: policy.limits.max_turns,
+                max_budget_usd: policy.limits.max_budget_usd,
+            },
         },
     ))
 }
@@ -238,6 +292,7 @@ mod tests {
             sandbox: SandboxPolicy {
                 launcher: "/usr/bin/bwrap".into(),
                 network: "deny".into(),
+                proxy_url: None,
                 writable_mounts: vec!["/work".into()],
                 runtime_mounts: vec!["/usr".into()],
                 required: true,
@@ -284,6 +339,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(permit.task_id, "task-1");
+        assert_eq!(permit.execution_bounds.max_turns, 1);
         assert!(
             authorize(
                 &p,
@@ -374,7 +430,95 @@ mod tests {
             }
             let (p, r) = write_authority(d.path(), &candidate, &Revocations::default());
             let uid = fs::metadata(&p).unwrap().uid();
-            assert!(authorize(
+            assert!(
+                authorize(
+                    &p,
+                    &r,
+                    uid,
+                    99,
+                    "task-1",
+                    "https://github.com/DryadAI/claudectl",
+                    "edit"
+                )
+                .is_err(),
+                "{mutation} weakening must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_policy_requires_exact_route_and_subscription_scope() {
+        let d = tempdir().unwrap();
+        let mut candidate = policy();
+        candidate.sandbox.network = "root-owned-loopback-proxy".into();
+        candidate.sandbox.proxy_url = Some("http://127.0.0.1:18443".into());
+        candidate.credentials.allowed =
+            vec!["user-approved-first-party-claude-subscription".into()];
+        candidate.credentials.forbidden.push("api-key".into());
+        let authorize_candidate = |value: &StandingPolicy| {
+            let (p, r) = write_authority(d.path(), value, &Revocations::default());
+            let uid = fs::metadata(&p).unwrap().uid();
+            authorize(
+                &p,
+                &r,
+                uid,
+                99,
+                "task-1",
+                "https://github.com/DryadAI/claudectl",
+                "edit",
+            )
+        };
+        assert_eq!(
+            authorize_candidate(&candidate).unwrap().1.route,
+            PermitRoute::RootOwnedLoopbackProxy
+        );
+        for mutation in [
+            "wrong-host",
+            "wrong-port",
+            "no-url",
+            "no-api-key-denial",
+            "offline-credentials",
+            "extra-credentials",
+            "network-allow",
+        ] {
+            let mut bad = candidate.clone();
+            match mutation {
+                "wrong-host" => bad.sandbox.proxy_url = Some("http://localhost:18443".into()),
+                "wrong-port" => bad.sandbox.proxy_url = Some("http://127.0.0.1:8080".into()),
+                "no-url" => bad.sandbox.proxy_url = None,
+                "no-api-key-denial" => bad.credentials.forbidden.retain(|s| s != "api-key"),
+                "offline-credentials" => {
+                    bad.credentials.allowed = vec!["explicit-approved-local-route".into()]
+                }
+                "extra-credentials" => bad.credentials.allowed.push("another".into()),
+                "network-allow" => bad.sandbox.network = "allow".into(),
+                _ => unreachable!(),
+            }
+            assert!(authorize_candidate(&bad).is_err(), "{mutation}");
+        }
+        let mut offline = policy();
+        offline.sandbox.proxy_url = candidate.sandbox.proxy_url;
+        assert!(authorize_candidate(&offline).is_err());
+    }
+
+    #[test]
+    fn shipped_proxy_example_is_parseable_but_inactive() {
+        let example =
+            include_str!("../../examples/druid-precision-standing-policy-proxy-proposed.json");
+        let policy: StandingPolicy = serde_json::from_str(example).unwrap();
+        assert_eq!(
+            policy.status,
+            PolicyStatus::InactiveUntilHostSandboxProbePasses
+        );
+        assert_eq!(
+            policy.sandbox.proxy_url.as_deref(),
+            Some("http://127.0.0.1:18443")
+        );
+        let d = tempdir().unwrap();
+        let (p, r) = write_authority(d.path(), &policy, &Revocations::default());
+        let uid = fs::metadata(&p).unwrap().uid();
+        assert!(
+            authorize(
                 &p,
                 &r,
                 uid,
@@ -383,7 +527,44 @@ mod tests {
                 "https://github.com/DryadAI/claudectl",
                 "edit"
             )
-            .is_err(), "{mutation} weakening must fail closed");
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_authority_field_is_rejected() {
+        let mut value = serde_json::to_value(policy()).unwrap();
+        value["sandbox_overrides"] = serde_json::json!({"network": "allow"});
+        assert!(serde_json::from_value::<StandingPolicy>(value).is_err());
+    }
+
+    #[test]
+    fn policy_cannot_claim_limits_above_transport_ceiling() {
+        let d = tempdir().unwrap();
+        for field in ["timeout", "output", "turns", "budget"] {
+            let mut candidate = policy();
+            match field {
+                "timeout" => candidate.limits.timeout_seconds = 3601,
+                "output" => candidate.limits.max_output_bytes = 1_048_577,
+                "turns" => candidate.limits.max_turns = 101,
+                "budget" => candidate.limits.max_budget_usd = 100.01,
+                _ => unreachable!(),
+            }
+            let (p, r) = write_authority(d.path(), &candidate, &Revocations::default());
+            let uid = fs::metadata(&p).unwrap().uid();
+            assert!(
+                authorize(
+                    &p,
+                    &r,
+                    uid,
+                    99,
+                    "task-1",
+                    "https://github.com/DryadAI/claudectl",
+                    "edit"
+                )
+                .is_err(),
+                "{field}"
+            );
         }
     }
 }
