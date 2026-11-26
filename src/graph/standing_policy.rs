@@ -163,7 +163,10 @@ pub fn authorize(
         || policy.limits.max_output_bytes > 1_048_576
         || policy.limits.max_turns == 0
         || policy.limits.max_turns > 100
-        || policy.limits.max_concurrency == 0
+        // The production transient-service boundary currently provides one
+        // global slot. Do not accept a policy promising more until a wider
+        // bounded scheduler is separately implemented and reviewed.
+        || policy.limits.max_concurrency != 1
         || policy.limits.max_retries > 5
         || policy.limits.max_budget_usd <= 0.0
         || !policy.limits.max_budget_usd.is_finite()
@@ -545,7 +548,14 @@ mod tests {
     #[test]
     fn policy_cannot_claim_limits_above_transport_ceiling() {
         let d = tempdir().unwrap();
-        for field in ["timeout", "output", "turns", "budget", "retries"] {
+        for field in [
+            "timeout",
+            "output",
+            "turns",
+            "budget",
+            "retries",
+            "concurrency",
+        ] {
             let mut candidate = policy();
             match field {
                 "timeout" => candidate.limits.timeout_seconds = 3601,
@@ -553,6 +563,7 @@ mod tests {
                 "turns" => candidate.limits.max_turns = 101,
                 "budget" => candidate.limits.max_budget_usd = 100.01,
                 "retries" => candidate.limits.max_retries = 6,
+                "concurrency" => candidate.limits.max_concurrency = 2,
                 _ => unreachable!(),
             }
             let (p, r) = write_authority(d.path(), &candidate, &Revocations::default());

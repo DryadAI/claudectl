@@ -112,6 +112,10 @@ fn resource_contract_is_bounded_and_transient_service_is_exact() {
         "--unit=druid-test.service",
         "--expand-environment=no",
         "--clearenv",
+        "/usr/bin/flock",
+        "--exclusive",
+        "--nonblock",
+        "/run/druid-worker-concurrency.lock",
         "/usr/bin/setpriv",
         "--clear-groups",
         "--bounding-set=-all",
@@ -121,6 +125,18 @@ fn resource_contract_is_bounded_and_transient_service_is_exact() {
         assert!(args.contains(&required), "missing {required}");
     }
     assert!(args.contains(&"--unshare-all"));
+    let lock = args
+        .iter()
+        .position(|arg| *arg == "/usr/bin/flock")
+        .unwrap();
+    let drop_identity = args
+        .iter()
+        .position(|arg| *arg == "/usr/bin/setpriv")
+        .unwrap();
+    assert!(
+        lock < drop_identity,
+        "service must acquire slot before worker exec"
+    );
     assert!(args.contains(&format!("--reuid={}", config.run_as_uid).as_str()));
     assert!(args.contains(&format!("--regid={}", config.run_as_gid).as_str()));
     assert!(

@@ -276,6 +276,16 @@ impl WorkerConfig {
                 "--property=RuntimeMaxSec={}s",
                 self.timeout.as_secs_f64().ceil() as u64
             ))
+            // The lock is acquired by the transient service, not its
+            // supervisor. If the supervisor crashes, a surviving service
+            // continues holding the slot until its cgroup is stopped.
+            // /run is root-owned; the worker UID cannot replace this path.
+            .args([
+                "/usr/bin/flock",
+                "--exclusive",
+                "--nonblock",
+                "/run/druid-worker-concurrency.lock",
+            ])
             // systemd User= would restore NSS supplementary groups. A root
             // service instead drops UID, GID, all groups, and capabilities
             // before the sandbox launcher, while retaining cgroup placement.

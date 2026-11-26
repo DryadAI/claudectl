@@ -11,7 +11,8 @@ tasks, and 1–100% of one CPU. The existing transport still enforces its own
 deadline, output cap, turn cap, and CLI budget.
 The adapter also rejects graph retry declarations and actual attempt numbers
 above the protected standing-policy retry ceiling. The graph supervisor still
-owns retry scheduling; cross-process concurrency is not yet enforced.
+owns retry scheduling. The standing-policy loader accepts only
+`max_concurrency: 1`; a policy promising more fails closed.
 
 For a configured production attempt, the root supervisor builds a transient
 systemd **service**, not a scope or a second scheduler. `systemd-run --pipe`
@@ -25,6 +26,13 @@ request `systemctl stop`; the unit runtime limit is a second backstop if the
 supervisor dies. The existing graph supervisor retains dependencies, retries,
 approval and evidence authority.
 
+Before `setpriv`, the transient service takes a nonblocking exclusive lock on
+`/run/druid-worker-concurrency.lock` via root-owned `/usr/bin/flock`. A second
+service exits before worker execution while the slot is held. The lock belongs
+to the service process, so a surviving unit keeps it if its supervisor dies.
+This is a single host-wide slot, not a distributed scheduler. Live contention
+and crash behavior still need independent proof.
+
 This is a candidate, not live isolation proof. Before activation, independently
 test on a disposable host/worktree that (1) the worker enters the intended
 cgroup before model/tool execution, (2) exact CPU, memory and PID ceilings are
@@ -33,9 +41,10 @@ supervisor crash, (4) failed unit creation never starts a worker, (5) the
 effective worker identity has no supplementary groups/capabilities, and (6)
 proxy-mode UID egress rules still apply. Verify that a failed `systemctl stop`
 cannot leave an indefinitely running unit; inspect the actual unit and cgroup
-after each failure. Keep provider registration and the protected standing
-policy inactive until this evidence and isolated subscription authentication
-exist. Concurrency enforcement remains a separate supervisor gate; retry
+after each failure. Prove that two simultaneous attempts cannot both enter the
+worker and that a surviving unit holds the slot after supervisor failure.
+Keep provider registration and the protected standing policy inactive until
+this evidence and isolated subscription authentication exist. Retry
 recovery/idempotence must be proven with a disposable graph.
 
 Offline evidence: `cargo test -p claudectl-core --lib headless::`,
