@@ -9,6 +9,9 @@ The core's direct Bubblewrap path remains for disposable transport tests; it is
 not an activation path. The limits are bounded to 64 MiB–2 GiB memory, 8–128
 tasks, and 1–100% of one CPU. The existing transport still enforces its own
 deadline, output cap, turn cap, and CLI budget.
+The adapter also rejects graph retry declarations and actual attempt numbers
+above the protected standing-policy retry ceiling. The graph supervisor still
+owns retry scheduling; cross-process concurrency is not yet enforced.
 
 For a configured production attempt, the root supervisor builds a transient
 systemd **service**, not a scope or a second scheduler. `systemd-run --pipe`
@@ -32,7 +35,8 @@ proxy-mode UID egress rules still apply. Verify that a failed `systemctl stop`
 cannot leave an indefinitely running unit; inspect the actual unit and cgroup
 after each failure. Keep provider registration and the protected standing
 policy inactive until this evidence and isolated subscription authentication
-exist. Concurrency/retry enforcement remains a separate supervisor gate.
+exist. Concurrency enforcement remains a separate supervisor gate; retry
+recovery/idempotence must be proven with a disposable graph.
 
 Offline evidence: `cargo test -p claudectl-core --lib headless::`,
 `cargo test --lib graph::`, targeted Clippy and `git diff --check`. These tests

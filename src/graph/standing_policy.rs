@@ -115,6 +115,7 @@ pub struct PermitExecutionBounds {
     pub max_turns: u32,
     /// CLI per-run ceiling; never authorization to use a paid API.
     pub max_budget_usd: f64,
+    pub max_retries: u32,
 }
 
 pub fn authorize(
@@ -163,6 +164,7 @@ pub fn authorize(
         || policy.limits.max_turns == 0
         || policy.limits.max_turns > 100
         || policy.limits.max_concurrency == 0
+        || policy.limits.max_retries > 5
         || policy.limits.max_budget_usd <= 0.0
         || !policy.limits.max_budget_usd.is_finite()
         || policy.limits.max_budget_usd > 100.0
@@ -237,6 +239,7 @@ pub fn authorize(
                 max_output_bytes: policy.limits.max_output_bytes,
                 max_turns: policy.limits.max_turns,
                 max_budget_usd: policy.limits.max_budget_usd,
+                max_retries: policy.limits.max_retries,
             },
         },
     ))
@@ -340,6 +343,7 @@ mod tests {
         .unwrap();
         assert_eq!(permit.task_id, "task-1");
         assert_eq!(permit.execution_bounds.max_turns, 1);
+        assert_eq!(permit.execution_bounds.max_retries, 0);
         assert!(
             authorize(
                 &p,
@@ -541,13 +545,14 @@ mod tests {
     #[test]
     fn policy_cannot_claim_limits_above_transport_ceiling() {
         let d = tempdir().unwrap();
-        for field in ["timeout", "output", "turns", "budget"] {
+        for field in ["timeout", "output", "turns", "budget", "retries"] {
             let mut candidate = policy();
             match field {
                 "timeout" => candidate.limits.timeout_seconds = 3601,
                 "output" => candidate.limits.max_output_bytes = 1_048_577,
                 "turns" => candidate.limits.max_turns = 101,
                 "budget" => candidate.limits.max_budget_usd = 100.01,
+                "retries" => candidate.limits.max_retries = 6,
                 _ => unreachable!(),
             }
             let (p, r) = write_authority(d.path(), &candidate, &Revocations::default());

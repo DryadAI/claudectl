@@ -93,7 +93,7 @@ impl Provider for HeadlessProvider<'_> {
         node: &NodeSpec,
         capability: &str,
         request: &Value,
-        _context: &ProviderContext<'_>,
+        context: &ProviderContext<'_>,
     ) -> Result<ProviderResult, String> {
         if capability != CAPABILITY
             || node.id != self.permit.task_id
@@ -126,6 +126,12 @@ impl Provider for HeadlessProvider<'_> {
             || self.worker.budget_usd > bounds.max_budget_usd
         {
             return Err("headless worker exceeds protected standing-policy limits".into());
+        }
+        if context.attempt == 0
+            || context.attempt > bounds.max_retries.saturating_add(1)
+            || node.retry.max_attempts.saturating_sub(1) > bounds.max_retries
+        {
+            return Err("headless attempt exceeds protected standing-policy retries".into());
         }
         if !cfg!(test) && self.worker.resources.is_none() {
             return Err("headless worker requires a host resource boundary".into());
@@ -206,6 +212,7 @@ mod tests {
                     max_output_bytes: 4096,
                     max_turns: 2,
                     max_budget_usd: 1.0,
+                    max_retries: 0,
                 },
             },
         };
@@ -236,6 +243,34 @@ mod tests {
             run_dir: dir.path(),
             attempt: 1,
         };
+        for attempted in [0, 2] {
+            let invalid_context = ProviderContext {
+                run_dir: dir.path(),
+                attempt: attempted,
+            };
+            assert!(
+                adapter
+                    .execute(
+                        node,
+                        CAPABILITY,
+                        &serde_json::json!({"cwd":worker.workspace,"prompt":"x"}),
+                        &invalid_context
+                    )
+                    .is_err()
+            );
+        }
+        let mut over_retried = node.clone();
+        over_retried.retry.max_attempts = 2;
+        assert!(
+            adapter
+                .execute(
+                    &over_retried,
+                    CAPABILITY,
+                    &serde_json::json!({"cwd":worker.workspace,"prompt":"x"}),
+                    &context
+                )
+                .is_err()
+        );
         for request in [
             serde_json::json!({"cwd":"/","prompt":"x"}),
             serde_json::json!({"cwd":worker.workspace,"prompt":"x","args":["--dangerously-skip-permissions"]}),
