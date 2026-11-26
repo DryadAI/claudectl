@@ -6,7 +6,6 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -56,8 +55,6 @@ impl ResourceLimits {
         Ok(())
     }
 }
-
-static NEXT_UNIT: AtomicU64 = AtomicU64::new(0);
 
 pub enum NetworkMode {
     Deny,
@@ -231,11 +228,21 @@ impl WorkerConfig {
         if unsafe { libc::geteuid() } != 0 {
             return Err("resource-limited worker requires root supervisor".into());
         }
-        let unit = format!(
-            "druid-worker-{}-{}.service",
-            std::process::id(),
-            NEXT_UNIT.fetch_add(1, Ordering::Relaxed)
-        );
+        let nonce = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
+            .map_err(|_| "worker unit nonce is unavailable")?;
+        let nonce = nonce.trim();
+        if nonce.len() != 36
+            || !nonce.chars().enumerate().all(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    c == '-'
+                } else {
+                    c.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Err("worker unit nonce is invalid".into());
+        }
+        let unit = format!("druid-worker-{nonce}.service");
         Ok((self.systemd_command(sandbox, resources, &unit), Some(unit)))
     }
 
