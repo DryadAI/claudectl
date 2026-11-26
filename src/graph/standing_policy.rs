@@ -13,6 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StandingPolicy {
     pub policy_id: String,
     pub status: PolicyStatus,
@@ -507,5 +508,12 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn unknown_top_level_authority_field_is_rejected() {
+        let mut value = serde_json::to_value(policy()).unwrap();
+        value["sandbox_overrides"] = serde_json::json!({"network": "allow"});
+        assert!(serde_json::from_value::<StandingPolicy>(value).is_err());
     }
 }
