@@ -27,6 +27,15 @@ Before any live cutover:
    stop for manual reconciliation; never drop or synthesize them.
 
 The coordinator directory is owner-only (`0700`) and the DB file is `0600`
-when opened by the v9 store. An existing live DB or its WAL/SHM sidecars must
+when opened by the v9 store. The default operator-profile `store::open()`
+refuses effective UID 0; it is not a shortcut for a future root broker. That
+broker needs a separately reviewed protected coordinator service and narrow
+local API. An existing live DB or its WAL/SHM sidecars must
 not be copied into a repository. This procedure is not proof of reboot
 persistence, root-broker support, worker policy, or production activation.
+
+Unit-test builds use disposable state homes for coordinator and bus stores
+when no explicit `CLAUDECTL_PROFILE` is set. This prevents a full Rust test
+run from silently opening an operator ledger. Integration or binary tests
+must still supply an isolated profile explicitly before invoking a live
+store path.

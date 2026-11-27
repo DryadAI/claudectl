@@ -11,6 +11,19 @@ use super::types::*;
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn db_path() -> PathBuf {
+    // Unit tests exercise callers that use the default store. Never let a
+    // cargo test run migrate an operator's real coordinator ledger.
+    #[cfg(test)]
+    let home = std::env::var_os("CLAUDECTL_PROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            static TEST_HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            TEST_HOME
+                .get_or_init(|| tempfile::tempdir().expect("private coordinator test home"))
+                .path()
+                .to_path_buf()
+        });
+    #[cfg(not(test))]
     let home = claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into());
     PathBuf::from(home)
         .join(".claudectl")
@@ -94,8 +107,20 @@ const HEADLESS_CLAIMS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS graph_headle
 
 /// Open (or create) the coordination database and run migrations.
 pub fn open() -> Result<Connection, String> {
+    #[cfg(unix)]
+    if !operator_profile_open_allowed(unsafe { libc::geteuid() }) {
+        return Err(
+            "root cannot open an operator-profile coordinator DB; use a reviewed protected coordinator service"
+                .into(),
+        );
+    }
     let path = db_path();
     open_at(&path)
+}
+
+#[cfg(unix)]
+fn operator_profile_open_allowed(effective_uid: libc::uid_t) -> bool {
+    effective_uid != 0
 }
 
 fn open_at(path: &std::path::Path) -> Result<Connection, String> {
@@ -1585,6 +1610,21 @@ mod tests {
         migrate(&conn).unwrap();
         // Triple-migrate too — `IF NOT EXISTS` should make this a no-op.
         migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn default_unit_test_store_is_not_the_operator_home() {
+        if std::env::var_os("CLAUDECTL_PROFILE").is_none() {
+            let path = db_path();
+            assert!(path.starts_with(std::env::temp_dir()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operator_profile_open_refuses_root_identity() {
+        assert!(!operator_profile_open_allowed(0));
+        assert!(operator_profile_open_allowed(1000));
     }
 
     #[test]
