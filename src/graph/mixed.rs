@@ -281,17 +281,8 @@ fn prepared_task(conn: &Connection, task: &TaskRow) -> Result<Option<PreparedNod
     let Some(run) = &task.graph_run_id else {
         return Ok(None);
     };
-    let Some((_, snapshot)) = snapshot(conn, run)? else {
-        if task
-            .policy
-            .as_ref()
-            .and_then(|p| p.pointer("/graph/snapshot_version"))
-            .is_some()
-        {
-            return Err("graph task is missing its required snapshot".into());
-        }
-        return Ok(None); // Legacy agent runs only.
-    };
+    let (_, snapshot) = snapshot(conn, run)?
+        .ok_or_else(|| "graph task is missing its required snapshot".to_string())?;
     let node_id = task
         .graph_node_id
         .as_ref()
@@ -329,6 +320,31 @@ fn prepared_task(conn: &Connection, task: &TaskRow) -> Result<Option<PreparedNod
 
 pub(crate) fn node_kind(conn: &Connection, task: &TaskRow) -> Result<Option<NodeKind>, String> {
     Ok(prepared_task(conn, task)?.map(|p| p.node.kind))
+}
+
+/// Session actions are the legacy Claude Code lane, never an implicit fallback
+/// for a graph node whose provider is changed to a headless worker. Recheck
+/// the stored snapshot at the effect boundary as well as at submission.
+pub(crate) fn require_legacy_session_agent(
+    conn: &Connection,
+    task: &TaskRow,
+) -> Result<(), String> {
+    if let Some(prepared) = prepared_task(conn, task)?
+        && !is_legacy_session_agent(&prepared.node)
+    {
+        return Err("graph node cannot use legacy Claude Code session actions".into());
+    }
+    Ok(())
+}
+
+fn is_legacy_session_agent(node: &NodeSpec) -> bool {
+    matches!(
+        &node.executor,
+        Some(ExecutorSpec::Provider { capability, provider, .. })
+            if node.kind == NodeKind::Agent
+                && capability == super::durable::AGENT_EXECUTE_CAPABILITY
+                && provider.as_deref().is_none_or(|name| name == "claude_code")
+    )
 }
 
 /// Match the full canonical compilation, not just its non-cryptographic fingerprint.

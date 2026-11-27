@@ -48,6 +48,11 @@ separate verifier/artifact collection before acceptance.
 
 ## Security boundaries that this code does NOT provide
 
+The proposed Precision resource-unit path is described in
+[its review note](druid-precision-resource-boundary.md). It has offline argv
+tests only; no live cgroup or cancellation proof. Until that proof exists, the
+resource and detached-descendant gaps below remain activation blockers.
+
 - A cwd/worktree is not a filesystem sandbox. Read/Edit/Write tools need external
   filesystem confinement. Tool permission flags are defense in depth only.
 - Process groups are not containment: a hostile detached descendant or a killed

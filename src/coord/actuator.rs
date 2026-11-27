@@ -80,6 +80,7 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
         if kind != crate::graph::schema::NodeKind::Agent {
             return Err("non-agent graph nodes cannot use session actions".into());
         }
+        crate::graph::mixed::require_legacy_session_agent(conn, &task)?;
         if !crate::graph::mixed::dependencies_done(conn, &task)? {
             return Err("graph agent dependencies are not complete".into());
         }
