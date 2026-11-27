@@ -27,7 +27,7 @@ contents. Output is one JSON status line. If it reports
 `destination_published_durability_unverified`, the file may exist: inspect it
 before retrying, never assume failure removed it.
 
-The separate audit checks schema v8, graph digests, fingerprints and claim
+The separate audit checks schema v9, graph digests, fingerprints and claim
 bindings. Producer success **does not** imply audit success, root-owned
 storage, transfer-safe policy, or approval to use the copy in a privileged
 broker. Do not commit, upload, or paste the snapshot: it may contain prompts,

@@ -25,7 +25,7 @@ class SnapshotAuditTests(unittest.TestCase):
         db = sqlite3.connect(self.path)
         db.executescript("""
             PRAGMA foreign_keys=ON;
-            PRAGMA user_version=8;
+            PRAGMA user_version=9;
             CREATE TABLE graph_runs(id TEXT PRIMARY KEY, fingerprint TEXT);
             CREATE TABLE tasks(id TEXT PRIMARY KEY, graph_run_id TEXT,
                                graph_node_id TEXT);
@@ -125,7 +125,7 @@ class SnapshotAuditTests(unittest.TestCase):
     def test_schema_drift_and_missing_table(self):
         self.fixture()
         with sqlite3.connect(self.path) as db:
-            db.execute("PRAGMA user_version=9")
+            db.execute("PRAGMA user_version=10")
             db.execute("DROP TABLE graph_headless_claims")
         result = audit_module.audit(self.path)
         self.assertFalse(result["pass"])
