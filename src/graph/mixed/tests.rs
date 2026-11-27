@@ -205,6 +205,308 @@ fn supervisor_routes_snapshot_headless_agent_to_inert_lane() {
     .unwrap();
     assert!(tick(&conn).is_empty());
 }
+
+#[test]
+fn protected_headless_claim_is_atomic_bound_and_never_self_verifies() {
+    let repo = tempfile::tempdir().unwrap();
+    let worktrees = tempfile::tempdir().unwrap();
+    let protected = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "DRUID test"]);
+    git(&["config", "user.email", "druid-test@example.invalid"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/DryadAI/claudectl",
+    ]);
+    std::fs::write(repo.path().join("seed.txt"), "base").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "--quiet", "-m", "seed"]);
+
+    let compiled = graph(
+        vec![json!({
+            "id":"candidate", "kind":"agent", "requires":["agent.execute"],
+            "workspace":{"mode":"worktree"},
+            "authority":{"filesystem_read":["**"], "filesystem_write":["**"]},
+            "retry":{"max_attempts":2},
+            "executor":{"kind":"provider","capability":"agent.execute",
+                "provider":"claude_code",
+                "request":{"cwd":repo.path(),"prompt":"offline test",
+                    "verify":[{"kind":"run","command":"test -f seed.txt"}]}}
+        })],
+        &[],
+    );
+    let mut conn = store::open_memory();
+    let submitted = submit(&mut conn, &compiled);
+    let task_id = &submitted.task_ids["candidate"];
+    let task = tasks::get_task(&conn, task_id).unwrap().unwrap();
+    let workspace =
+        crate::coord::workspace::prepare_task_workspace_at(&task, worktrees.path()).unwrap();
+    tasks::set_workspace_path(&conn, task_id, workspace.to_str().unwrap()).unwrap();
+
+    // Ordinary admission remains closed. Only this test synthesizes a
+    // headless snapshot to exercise the still-unwired protected claim.
+    let (_, mut saved) = snapshot(&conn, &submitted.graph_run_id).unwrap().unwrap();
+    for node in [
+        &mut saved.compiled.spec.nodes[0],
+        &mut saved.nodes.get_mut("candidate").unwrap().node,
+    ] {
+        if let Some(ExecutorSpec::Provider { provider, .. }) = &mut node.executor {
+            *provider = Some("claude_code_headless".into());
+        }
+    }
+    saved.compiled = compiler::compile(saved.compiled.spec.clone()).unwrap();
+    conn.execute(
+        "UPDATE graph_runs SET fingerprint=?1 WHERE id=?2",
+        rusqlite::params![saved.compiled.fingerprint, submitted.graph_run_id],
+    )
+    .unwrap();
+    let json = serde_json::to_string(&saved).unwrap();
+    let digest = format!("{:x}", sha2::Sha256::digest(json.as_bytes()));
+    conn.execute(
+        "UPDATE graph_snapshots SET snapshot_json=?1,digest=?2 WHERE run_id=?3",
+        rusqlite::params![json, digest, submitted.graph_run_id],
+    )
+    .unwrap();
+
+    let policy_path = protected.path().join("policy.json");
+    let revocations_path = protected.path().join("revocations.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let policy = json!({
+        "policy_id":"offline-test", "status":"active", "expires_at_unix_ms":now + 60_000,
+        "repositories":[{"remote":"https://github.com/DryadAI/claudectl","operations":["edit"]}],
+        "limits":{"timeout_seconds":60,"max_output_bytes":1024,"max_turns":2,
+            "max_budget_usd":1.0,"max_concurrency":1,"max_retries":1},
+        "fresh_human_approval_required":["deploy","merge"],
+        "identity":{"required_uid":"druid-worker","no_sudo":true,"no_docker_socket":true,
+            "no_ssh_agent":true,"home":"ephemeral"},
+        "sandbox":{"launcher":"/usr/bin/bwrap","network":"deny","proxy_url":null,
+            "writable_mounts":["/work"],"runtime_mounts":["/usr"],"required":true},
+        "credentials":{"allowed":["explicit-approved-local-route"],
+            "forbidden":["host-home","ssh-agent","docker-socket","browser-session","paid-api-fallback"]}
+    });
+    std::fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    std::fs::write(&revocations_path, b"{}").unwrap();
+
+    let uid = unsafe { libc::geteuid() };
+    let claim = |conn: &mut Connection, attempt, approval_digest: &str| {
+        claim_headless_at(
+            conn,
+            task_id,
+            attempt,
+            approval_digest,
+            &policy_path,
+            &revocations_path,
+            worktrees.path(),
+            uid,
+        )
+    };
+    assert!(claim(&mut conn, 1, "wrong digest").is_err());
+    assert!(claim(&mut conn, 2, &digest).unwrap().is_none());
+    assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 0);
+    std::fs::write(
+        &revocations_path,
+        serde_json::to_vec(&json!({"task_ids":[task_id]})).unwrap(),
+    )
+    .unwrap();
+    assert!(claim(&mut conn, 1, &digest).is_err());
+    assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 0);
+    std::fs::write(&revocations_path, b"{}").unwrap();
+
+    let mut inactive = policy.clone();
+    inactive["status"] = json!("revoked");
+    std::fs::write(&policy_path, serde_json::to_vec(&inactive).unwrap()).unwrap();
+    assert!(claim(&mut conn, 1, &digest).is_err());
+    let mut wrong_repo = policy.clone();
+    wrong_repo["repositories"][0]["remote"] = json!("https://github.com/DryadAI/other");
+    std::fs::write(&policy_path, serde_json::to_vec(&wrong_repo).unwrap()).unwrap();
+    assert!(claim(&mut conn, 1, &digest).is_err());
+    std::fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    tasks::set_workspace_path(&conn, task_id, repo.path().to_str().unwrap()).unwrap();
+    assert!(claim(&mut conn, 1, &digest).is_err());
+    tasks::set_workspace_path(&conn, task_id, workspace.to_str().unwrap()).unwrap();
+    conn.execute(
+        "UPDATE tasks SET verifiers=?1 WHERE id=?2",
+        rusqlite::params![r#"[{"kind":"run","command":"true"}]"#, task_id],
+    )
+    .unwrap();
+    assert!(claim(&mut conn, 1, &digest).is_err());
+    conn.execute(
+        "UPDATE tasks SET verifiers=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_string(&task.verifiers).unwrap(), task_id],
+    )
+    .unwrap();
+    use rusqlite::types::Value as SqlValue;
+    let drifted_fields = [
+        (
+            "prompt",
+            SqlValue::Text("forged prompt".into()),
+            SqlValue::Text(task.prompt.clone()),
+        ),
+        (
+            "role",
+            SqlValue::Text("forged role".into()),
+            task.role
+                .clone()
+                .map(SqlValue::Text)
+                .unwrap_or(SqlValue::Null),
+        ),
+        (
+            "model",
+            SqlValue::Text("paid-model".into()),
+            task.model
+                .clone()
+                .map(SqlValue::Text)
+                .unwrap_or(SqlValue::Null),
+        ),
+        (
+            "budget_usd",
+            SqlValue::Real(50.0),
+            task.budget_usd
+                .map(SqlValue::Real)
+                .unwrap_or(SqlValue::Null),
+        ),
+        (
+            "timeout_min",
+            SqlValue::Integer(999),
+            SqlValue::Integer(i64::from(task.timeout_min)),
+        ),
+        (
+            "max_retries",
+            SqlValue::Integer(99),
+            SqlValue::Integer(i64::from(task.max_retries)),
+        ),
+    ];
+    for (field, forged, original) in drifted_fields {
+        let update = format!("UPDATE tasks SET {field}=?1 WHERE id=?2");
+        conn.execute(&update, rusqlite::params![forged, task_id])
+            .unwrap();
+        assert!(
+            claim(&mut conn, 1, &digest).is_err(),
+            "{field} drift accepted"
+        );
+        conn.execute(&update, rusqlite::params![original, task_id])
+            .unwrap();
+    }
+    assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 0);
+
+    let claimed = claim(&mut conn, 1, &digest).unwrap().unwrap();
+    assert_eq!(claimed.attempt, 1);
+    assert_eq!(claimed.task_id, *task_id);
+    assert_eq!(claimed.worktree, workspace);
+    assert_eq!(claimed.snapshot_digest, digest);
+    assert_eq!(claimed.policy_id, "offline-test");
+    assert_eq!(state(&conn, task_id), TaskState::Running);
+    assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 1);
+    assert!(claim(&mut conn, 1, &digest).unwrap().is_none());
+    assert!(claim(&mut conn, 2, &digest).unwrap().is_none());
+    let recorded: (String, String, String) = conn
+        .query_row(
+            "SELECT snapshot_digest,worktree_path,bounds_json FROM graph_headless_claims WHERE attempt_id=?1",
+            [&claimed.attempt_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(recorded.0, digest);
+    assert_eq!(recorded.1, workspace.to_string_lossy());
+    let accepted_policy = standing_policy::authorize(
+        &policy_path,
+        &revocations_path,
+        uid,
+        now,
+        task_id,
+        "https://github.com/DryadAI/claudectl",
+        "edit",
+    )
+    .unwrap()
+    .0;
+    let expected_policy_sha256 = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&accepted_policy).unwrap())
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&recorded.2).unwrap()["policy_sha256"],
+        expected_policy_sha256
+    );
+    assert!(
+        tasks::transition(
+            &mut conn,
+            task_id,
+            TaskState::Running,
+            TaskState::Done,
+            "forged-success"
+        )
+        .is_err()
+    );
+    assert_eq!(state(&conn, task_id), TaskState::Running);
+    assert!(tick(&conn).is_empty());
+
+    // A reopened ledger still sees the claim. A daemon crash does not
+    // authorize a second attempt or turn Running into Done.
+    let reopened_path = protected.path().join("reopened.sqlite");
+    conn.execute("VACUUM INTO ?1", [reopened_path.to_str().unwrap()])
+        .unwrap();
+    let mut reopened = Connection::open(&reopened_path).unwrap();
+    reopened.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert!(claim(&mut reopened, 2, &digest).unwrap().is_none());
+    assert_eq!(tasks::attempt_count(&reopened, task_id).unwrap(), 1);
+    assert_eq!(state(&reopened, task_id), TaskState::Running);
+
+    // Simulate a future verifier recording failure and moving the task to
+    // Retrying. Its old claim must not satisfy a new Running transition.
+    reopened
+        .execute(
+            "UPDATE tasks SET state=?1 WHERE id=?2",
+            rusqlite::params![TaskState::Retrying.as_str(), task_id],
+        )
+        .unwrap();
+    reopened
+        .execute(
+            "INSERT INTO task_transitions(task_id,from_state,to_state,cause,at)
+         VALUES (?1,'RUNNING','RETRYING','synthetic-verifier-fail','2000-01-01T00:00:00Z')",
+            [task_id],
+        )
+        .unwrap();
+    assert!(
+        tasks::transition(
+            &mut reopened,
+            task_id,
+            TaskState::Retrying,
+            TaskState::Running,
+            "forged-retry"
+        )
+        .is_err()
+    );
+    // Even an unfinished old attempt cannot be replayed across a newer
+    // transition: the claim is bound to the exact prior transition ID.
+    reopened
+        .execute(
+            "UPDATE task_attempts SET ended_at='2000-01-01T00:00:00Z',outcome='FAIL' WHERE id=?1",
+            [&claimed.attempt_id],
+        )
+        .unwrap();
+    assert_eq!(tasks::attempt_count(&reopened, task_id).unwrap(), 1);
+    let second = claim(&mut reopened, 2, &digest).unwrap().unwrap();
+    assert_eq!(second.attempt, 2);
+    assert_eq!(tasks::attempt_count(&reopened, task_id).unwrap(), 2);
+}
 fn run(conn: &mut Connection, task: &str, base: &Path) {
     let expected = tasks::attempt_count(conn, task).unwrap() + 1;
     execute_with_registry(conn, task, expected, &ProviderRegistry::new(), base).unwrap();

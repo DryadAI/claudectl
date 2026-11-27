@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::compiler::CompiledGraph;
 use super::schema::{ExecutorSpec, NodeKind, NodeSpec, Outcome, WorkspaceMode};
 use crate::coord::store;
-use crate::coord::tasks::{self, NewTask};
+use crate::coord::tasks::{self, NewTask, TaskRow};
 use crate::coord::verify::Verifier;
 
 pub const AGENT_EXECUTE_CAPABILITY: &str = "agent.execute";
@@ -458,6 +458,29 @@ fn agent_request(node: &NodeSpec) -> Result<AgentTaskRequest, String> {
         ));
     }
     Ok(request)
+}
+
+/// The durable task row is a projection of the compiled agent declaration.
+/// A headless claim must not authorize a worker from a modified projection.
+pub(crate) fn validate_headless_task_binding(
+    node: &NodeSpec,
+    task: &TaskRow,
+) -> Result<(), String> {
+    let request = agent_request(node)?;
+    let cwd = std::fs::canonicalize(&request.cwd)
+        .map_err(|e| format!("resolve declared headless cwd: {e}"))?;
+    if task.cwd != cwd.to_string_lossy()
+        || task.prompt != request.prompt
+        || task.role != request.role
+        || task.model != request.model
+        || task.budget_usd != request.budget_usd
+        || task.timeout_min != request.timeout_min.unwrap_or(45)
+        || task.max_retries != node.retry.max_attempts.saturating_sub(1)
+        || task.verifiers != request.verify
+    {
+        return Err("headless task fields differ from compiled graph".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
