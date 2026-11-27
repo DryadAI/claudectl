@@ -312,6 +312,20 @@ fn prepared_task(conn: &Connection, task: &TaskRow) -> Result<Option<PreparedNod
         .get(node_id)
         .ok_or("graph snapshot missing node")?
         .clone();
+    if prepared.node.kind == NodeKind::Agent {
+        let canonical = snapshot
+            .compiled
+            .spec
+            .nodes
+            .iter()
+            .find(|node| &node.id == node_id)
+            .ok_or("graph snapshot missing compiled agent node")?;
+        if serde_json::to_value(canonical).map_err(|e| e.to_string())?
+            != serde_json::to_value(&prepared.node).map_err(|e| e.to_string())?
+        {
+            return Err("prepared agent differs from compiled graph snapshot".into());
+        }
+    }
     if task.cwd != prepared.cwd {
         return Err("task cwd differs from stored graph".into());
     }
@@ -320,6 +334,40 @@ fn prepared_task(conn: &Connection, task: &TaskRow) -> Result<Option<PreparedNod
 
 pub(crate) fn node_kind(conn: &Connection, task: &TaskRow) -> Result<Option<NodeKind>, String> {
     Ok(prepared_task(conn, task)?.map(|p| p.node.kind))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentLane {
+    LegacySession,
+    Headless,
+}
+
+/// Derive routing only from the stored, versioned snapshot. A graph task
+/// without a snapshot or an unrecognized provider must not fall back to the
+/// legacy session launcher.
+pub(crate) fn agent_lane(conn: &Connection, task: &TaskRow) -> Result<Option<AgentLane>, String> {
+    let Some(prepared) = prepared_task(conn, task)? else {
+        return Ok(None);
+    };
+    classify_agent_lane(&prepared.node)
+}
+
+fn classify_agent_lane(node: &NodeSpec) -> Result<Option<AgentLane>, String> {
+    if node.kind != NodeKind::Agent {
+        return Ok(None);
+    }
+    match &node.executor {
+        Some(ExecutorSpec::Provider {
+            capability,
+            provider,
+            ..
+        }) if capability == super::durable::AGENT_EXECUTE_CAPABILITY => match provider.as_deref() {
+            None | Some("claude_code") => Ok(Some(AgentLane::LegacySession)),
+            Some("claude_code_headless") => Ok(Some(AgentLane::Headless)),
+            _ => Err("graph agent provider has no authorized execution lane".into()),
+        },
+        _ => Err("graph agent has no authorized execution lane".into()),
+    }
 }
 
 /// Session actions are the legacy Claude Code lane, never an implicit fallback
