@@ -318,6 +318,22 @@ fn protected_headless_claim_is_atomic_bound_and_never_self_verifies() {
             uid,
         )
     };
+    // The production entry point cannot accept a caller-supplied SQLite
+    // connection until the coordinator ledger is protected. This remains
+    // closed even though the synthetic transaction below is testable.
+    assert!(
+        claim_headless(
+            &mut conn,
+            task_id,
+            1,
+            &digest,
+            &policy_path,
+            &revocations_path,
+            worktrees.path(),
+        )
+        .is_err()
+    );
+    assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 0);
     assert!(claim(&mut conn, 1, "wrong digest").is_err());
     assert!(claim(&mut conn, 2, &digest).unwrap().is_none());
     assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 0);

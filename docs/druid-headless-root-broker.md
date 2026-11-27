@@ -42,9 +42,17 @@ The source also stages a Linux file-descriptor reader for an absolute,
 root-owned admission path. It walks from `/` with `openat(O_NOFOLLOW)`, checks
 each directory's owner and writable bits, then requires a root-owned, private
 regular file and reads no more than 4 KiB from the verified descriptor. This
-avoids a metadata-check/path-read swap for **that admission file only**. It
-does not yet authenticate the existing standing-policy/revocation loader,
-which remains a separate review gate before a root broker may use it.
+avoids a metadata-check/path-read swap for the admission file. A separate
+root-only wrapper uses the same reader for bounded standing-policy and
+revocation files and then runs their existing content validator. The legacy
+path-based policy loader remains for non-broker callers; do not use it as
+root-broker authority. Neither wrapper is connected to a service.
+
+The previous root-only `claim_headless` entry point now returns an explicit
+inactive error even when called as root, because its `Connection` argument
+could otherwise refer to an operator-owned SQLite file. Its atomic claim
+logic remains in a private synthetic-test path. This is a deliberate
+fail-closed change, not a completed broker or a lost test of the transaction.
 
 ## Required design gate before wiring
 
@@ -68,6 +76,8 @@ user-controlled path as root. Before any connection to `claim_headless`:
    unit template and resource bounds outside graph JSON and outside any
    user-writable tree. Root independently reloads/checks the active policy,
    exact stored snapshot digest and attempt state before an external effect.
+   The staged no-follow readers address file origin only; no host paths have
+   been installed or verified.
 3. Define the crash window between durable claim and transient unit creation.
    A claimed but uncertain attempt must not auto-replay. Reconcile the exact
    unit/cgroup, record evidence, or enter `NeedsHuman`.

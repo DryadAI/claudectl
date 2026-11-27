@@ -118,6 +118,9 @@ pub struct PermitExecutionBounds {
     pub max_retries: u32,
 }
 
+/// Legacy path-based loader. It checks immediate owner/mode but follows
+/// metadata and reopens by path, so a privileged root broker must use the
+/// separate FD-pinned `headless_broker::authorize_protected_root` path instead.
 pub fn authorize(
     policy_path: &Path,
     revocations_path: &Path,
@@ -129,14 +132,34 @@ pub fn authorize(
 ) -> Result<(StandingPolicy, PolicyPermit), String> {
     protect(policy_path, required_owner_uid)?;
     protect(revocations_path, required_owner_uid)?;
-    let policy: StandingPolicy = serde_json::from_slice(
-        &fs::read(policy_path).map_err(|_| "read protected standing policy failed")?,
+    let policy_bytes =
+        fs::read(policy_path).map_err(|_| "read protected standing policy failed")?;
+    let revocation_bytes =
+        fs::read(revocations_path).map_err(|_| "read protected revocation ledger failed")?;
+    authorize_contents(
+        &policy_bytes,
+        &revocation_bytes,
+        now_unix_ms,
+        task_id,
+        repository_remote,
+        operation,
     )
-    .map_err(|_| "invalid protected standing policy")?;
-    let revocations: Revocations = serde_json::from_slice(
-        &fs::read(revocations_path).map_err(|_| "read protected revocation ledger failed")?,
-    )
-    .map_err(|_| "invalid protected revocation ledger")?;
+}
+
+/// Validate content already loaded through a trusted file-descriptor reader.
+/// Calling this with client-supplied bytes does not create authority.
+pub(crate) fn authorize_contents(
+    policy_bytes: &[u8],
+    revocation_bytes: &[u8],
+    now_unix_ms: u128,
+    task_id: &str,
+    repository_remote: &str,
+    operation: &str,
+) -> Result<(StandingPolicy, PolicyPermit), String> {
+    let policy: StandingPolicy =
+        serde_json::from_slice(policy_bytes).map_err(|_| "invalid protected standing policy")?;
+    let revocations: Revocations = serde_json::from_slice(revocation_bytes)
+        .map_err(|_| "invalid protected revocation ledger")?;
     if policy.status != PolicyStatus::Active || now_unix_ms >= policy.expires_at_unix_ms {
         return Err("standing policy is inactive or expired".into());
     }
