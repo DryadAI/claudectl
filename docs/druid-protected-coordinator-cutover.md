@@ -74,3 +74,7 @@ and the minimal allowed operation set. The recommended direction is a
 dedicated coordinator identity under a root-owned parent with a narrow local
 API, but these values require an explicit reviewed host design. No current
 source endpoint or SDK implements this contract.
+
+The staged read-only request shape is in
+`druid-protected-coordinator-read-contract.md`. It has no listener or ledger
+access and cannot be treated as a working coordinator service.
