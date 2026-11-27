@@ -86,6 +86,9 @@ pub fn apply(conn: &mut Connection, fx: &dyn SideEffects, action: &Action) -> Re
         }
     }
     match action {
+        Action::ExecuteHeadlessNode { .. } => Err(
+            "durable headless execution is not activated: protected admission and independent verification are required".into(),
+        ),
         Action::ExecuteGraphNode {
             task_id,
             expected_attempt,
@@ -745,6 +748,28 @@ mod tests {
         assert_eq!(
             get_task(&conn, &id).unwrap().unwrap().state,
             TaskState::AwaitingApproval
+        );
+    }
+
+    #[test]
+    fn headless_action_is_inert_even_if_constructed_directly() {
+        let mut conn = store::open_memory();
+        let fx = RecordingFx::default();
+        let result = apply(
+            &mut conn,
+            &fx,
+            &Action::ExecuteHeadlessNode {
+                task_id: "forged-task".into(),
+                expected_attempt: 1,
+            },
+        );
+        assert!(result.unwrap_err().contains("not activated"));
+        assert!(fx.spawned.borrow().is_empty());
+        assert!(fx.published.borrow().is_empty());
+        assert!(
+            crate::coord::tasks::list_tasks(&conn, None)
+                .unwrap()
+                .is_empty()
         );
     }
 

@@ -106,6 +106,95 @@ fn state(conn: &Connection, task: &str) -> TaskState {
 fn tick(conn: &Connection) -> Vec<Action> {
     Supervisor::with_defaults().tick(conn, &Quiet).unwrap()
 }
+
+#[test]
+fn agent_lane_is_explicit_and_rejects_unknown_providers() {
+    let mut node: NodeSpec = serde_json::from_value(json!({
+        "id":"candidate", "kind":"agent", "requires":["agent.execute"],
+        "executor":{"kind":"provider","capability":"agent.execute",
+            "provider":"claude_code", "request":{"cwd":".","prompt":"offline"}}
+    }))
+    .unwrap();
+    assert_eq!(
+        classify_agent_lane(&node).unwrap(),
+        Some(AgentLane::LegacySession)
+    );
+    if let Some(ExecutorSpec::Provider { provider, .. }) = &mut node.executor {
+        *provider = Some("claude_code_headless".into());
+    }
+    assert_eq!(
+        classify_agent_lane(&node).unwrap(),
+        Some(AgentLane::Headless)
+    );
+    if let Some(ExecutorSpec::Provider { provider, .. }) = &mut node.executor {
+        *provider = Some("untrusted-provider".into());
+    }
+    assert!(classify_agent_lane(&node).is_err());
+    node.executor = None;
+    assert!(classify_agent_lane(&node).is_err());
+}
+
+#[test]
+fn supervisor_routes_snapshot_headless_agent_to_inert_lane() {
+    // Synthesize the snapshot a future protected admission path would write.
+    // Ordinary durable::submit still rejects this provider atomically.
+    let dir = tempfile::tempdir().unwrap();
+    let compiled = graph(
+        vec![json!({
+            "id":"candidate", "kind":"agent", "requires":["agent.execute"],
+            "workspace":{"mode":"worktree"},
+            "executor":{"kind":"provider","capability":"agent.execute",
+                "provider":"claude_code", "request":{"cwd":dir.path(),"prompt":"offline"}}
+        })],
+        &[],
+    );
+    let mut conn = store::open_memory();
+    let submitted = submit(&mut conn, &compiled);
+    let (_, mut saved) = snapshot(&conn, &submitted.graph_run_id).unwrap().unwrap();
+    let headless = "claude_code_headless".to_string();
+    if let Some(ExecutorSpec::Provider { provider, .. }) =
+        &mut saved.compiled.spec.nodes[0].executor
+    {
+        *provider = Some(headless.clone());
+    }
+    if let Some(ExecutorSpec::Provider { provider, .. }) =
+        &mut saved.nodes.get_mut("candidate").unwrap().node.executor
+    {
+        *provider = Some(headless);
+    }
+    let json = serde_json::to_string(&saved).unwrap();
+    let digest = format!("{:x}", sha2::Sha256::digest(json.as_bytes()));
+    conn.execute(
+        "UPDATE graph_snapshots SET snapshot_json=?1, digest=?2 WHERE run_id=?3",
+        rusqlite::params![json, digest, submitted.graph_run_id],
+    )
+    .unwrap();
+    let task = &submitted.task_ids["candidate"];
+    assert_eq!(
+        tick(&conn),
+        vec![Action::ExecuteHeadlessNode {
+            task_id: task.clone(),
+            expected_attempt: 1,
+        }]
+    );
+    assert_eq!(state(&conn, task), TaskState::Pending);
+    assert_eq!(tasks::attempt_count(&conn, task).unwrap(), 0);
+
+    // A stranded assigned headless task must not take the old mailbox
+    // timeout -> Spawn path, even after the timeout has elapsed.
+    tasks::insert_attempt(&conn, task, 1, None, None, None).unwrap();
+    conn.execute(
+        "UPDATE task_attempts SET started_at='2000-01-01T00:00:00Z' WHERE task_id=?1",
+        [task],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE tasks SET state=?1 WHERE id=?2",
+        rusqlite::params![TaskState::Assigned.as_str(), task,],
+    )
+    .unwrap();
+    assert!(tick(&conn).is_empty());
+}
 fn run(conn: &mut Connection, task: &str, base: &Path) {
     let expected = tasks::attempt_count(conn, task).unwrap() + 1;
     execute_with_registry(conn, task, expected, &ProviderRegistry::new(), base).unwrap();

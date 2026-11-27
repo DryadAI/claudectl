@@ -37,6 +37,12 @@ pub enum Action {
         task_id: String,
         expected_attempt: u32,
     },
+    /// Reserved for a protected host-authorized worker path. The actuator
+    /// currently rejects this action before any attempt or external effect.
+    ExecuteHeadlessNode {
+        task_id: String,
+        expected_attempt: u32,
+    },
     AwaitGraphApproval {
         task_id: String,
     },
@@ -292,19 +298,42 @@ impl Supervisor {
             let mut slots = self.policy.max_concurrent - in_flight;
 
             for task in retrying.iter().take(slots as usize) {
-                if let Some(kind) = crate::graph::mixed::node_kind(conn, task)?
-                    && kind != crate::graph::schema::NodeKind::Agent
-                {
-                    if dependency_gate(conn, task)? == DependencyGate::Ready {
+                let kind = crate::graph::mixed::node_kind(conn, task)?;
+                let lane = crate::graph::mixed::agent_lane(conn, task)?;
+                if kind.is_some() && dependency_gate(conn, task)? != DependencyGate::Ready {
+                    continue;
+                }
+                match (kind, lane) {
+                    (
+                        Some(crate::graph::schema::NodeKind::Agent),
+                        Some(crate::graph::mixed::AgentLane::Headless),
+                    ) => {
+                        out.push(Action::ExecuteHeadlessNode {
+                            task_id: task.id.clone(),
+                            expected_attempt: super::tasks::attempt_count(conn, &task.id)? + 1,
+                        });
+                    }
+                    (
+                        Some(crate::graph::schema::NodeKind::Agent),
+                        Some(crate::graph::mixed::AgentLane::LegacySession),
+                    )
+                    | (None, None) => {
+                        out.push(Action::Retry {
+                            task_id: task.id.clone(),
+                        });
+                    }
+                    (Some(crate::graph::schema::NodeKind::Agent), None) | (None, Some(_)) => {
+                        return Err("agent execution lane disagrees with stored graph".into());
+                    }
+                    (Some(_), None) => {
                         out.push(Action::ExecuteGraphNode {
                             task_id: task.id.clone(),
                             expected_attempt: super::tasks::attempt_count(conn, &task.id)? + 1,
                         });
                     }
-                } else {
-                    out.push(Action::Retry {
-                        task_id: task.id.clone(),
-                    });
+                    (Some(_), Some(_)) => {
+                        return Err("non-agent graph node has an agent lane".into());
+                    }
                 }
                 slots = slots.saturating_sub(1);
             }
@@ -318,7 +347,21 @@ impl Supervisor {
                             });
                             continue;
                         }
-                        crate::graph::schema::NodeKind::Agent => {}
+                        crate::graph::schema::NodeKind::Agent => {
+                            match crate::graph::mixed::agent_lane(conn, task)? {
+                                Some(crate::graph::mixed::AgentLane::Headless) => {
+                                    out.push(Action::ExecuteHeadlessNode {
+                                        task_id: task.id.clone(),
+                                        expected_attempt: super::tasks::attempt_count(
+                                            conn, &task.id,
+                                        )? + 1,
+                                    });
+                                    continue;
+                                }
+                                Some(crate::graph::mixed::AgentLane::LegacySession) => {}
+                                None => return Err("graph agent has no execution lane".into()),
+                            }
+                        }
                         _ => {
                             out.push(Action::ExecuteGraphNode {
                                 task_id: task.id.clone(),
@@ -349,6 +392,13 @@ impl Supervisor {
         //    is the trigger — RFC §4's "role mailbox unclaimed > T".
         let observed = sensors.observed_sessions();
         for task in &assigned {
+            // An interrupted headless attempt needs unit/cgroup reconciliation,
+            // never the legacy mailbox timeout fallback.
+            if crate::graph::mixed::agent_lane(conn, task)?
+                == Some(crate::graph::mixed::AgentLane::Headless)
+            {
+                continue;
+            }
             let elapsed_min = match super::tasks::latest_attempt_age_minutes(conn, &task.id)? {
                 Some(m) => m,
                 None => continue,
@@ -382,6 +432,13 @@ impl Supervisor {
             .map(|s| (s.session_id.as_str(), s))
             .collect();
         for task in &running {
+            // The legacy hook/session health signals cannot prove the state of
+            // a transient headless worker. Leave it uncertain for reconciliation.
+            if crate::graph::mixed::agent_lane(conn, task)?
+                == Some(crate::graph::mixed::AgentLane::Headless)
+            {
+                continue;
+            }
             let session_id = super::tasks::latest_session_id(conn, &task.id)?;
             let Some(session_id) = session_id else {
                 continue;

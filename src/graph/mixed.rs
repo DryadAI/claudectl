@@ -322,6 +322,40 @@ pub(crate) fn node_kind(conn: &Connection, task: &TaskRow) -> Result<Option<Node
     Ok(prepared_task(conn, task)?.map(|p| p.node.kind))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentLane {
+    LegacySession,
+    Headless,
+}
+
+/// Derive routing only from the stored, versioned snapshot. A graph task
+/// without a snapshot or an unrecognized provider must not fall back to the
+/// legacy session launcher.
+pub(crate) fn agent_lane(conn: &Connection, task: &TaskRow) -> Result<Option<AgentLane>, String> {
+    let Some(prepared) = prepared_task(conn, task)? else {
+        return Ok(None);
+    };
+    classify_agent_lane(&prepared.node)
+}
+
+fn classify_agent_lane(node: &NodeSpec) -> Result<Option<AgentLane>, String> {
+    if node.kind != NodeKind::Agent {
+        return Ok(None);
+    }
+    match &node.executor {
+        Some(ExecutorSpec::Provider {
+            capability,
+            provider,
+            ..
+        }) if capability == super::durable::AGENT_EXECUTE_CAPABILITY => match provider.as_deref() {
+            None | Some("claude_code") => Ok(Some(AgentLane::LegacySession)),
+            Some("claude_code_headless") => Ok(Some(AgentLane::Headless)),
+            _ => Err("graph agent provider has no authorized execution lane".into()),
+        },
+        _ => Err("graph agent has no authorized execution lane".into()),
+    }
+}
+
 /// Session actions are the legacy Claude Code lane, never an implicit fallback
 /// for a graph node whose provider is changed to a headless worker. Recheck
 /// the stored snapshot at the effect boundary as well as at submission.

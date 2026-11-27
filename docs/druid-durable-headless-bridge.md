@@ -1,18 +1,21 @@
 # DRUID durable headless bridge — implementation contract
 
-Status: proposed design, not implemented or authorized for activation. This
-document describes the next reviewed code change after the resource-boundary
-candidate. No worker, model, transient unit, or protected policy is enabled by
-this document.
+Status: staged implementation, **not authorized for activation**. The
+supervisor now distinguishes the stored `claude_code_headless` provider and
+emits `ExecuteHeadlessNode` instead of a legacy session action. The actuator
+rejects that action before an attempt or external effect. Ordinary durable
+submission still rejects the provider. No worker, model, transient unit, or
+protected policy is enabled by this change.
 
 ## Current source boundary
 
 - `graph::durable::validate_durable_graph` rejects
   `claude_code_headless` before inserting any task. This remains the safe
-  default until host-side authorization and a separate action lane exist.
-- `coord::supervisor::tick` currently emits legacy `Spawn`/`Retry` for agent
-  tasks. `coord::actuator::apply` now rejects non-legacy graph providers on
-  session actions; it must not be weakened to make headless work.
+  default until protected host admission exists.
+- `coord::supervisor::tick` emits a distinct, currently inert headless action
+  for a stored headless agent snapshot. `coord::actuator::apply` rejects it;
+  session actions still reject non-legacy graph providers. An unknown provider
+  fails closed instead of falling into `Spawn` or `Retry`.
 - `graph::mixed::claim_at` refuses agent nodes. Its `finish` transitions a
   passing deterministic provider result directly to `Done`. Calling that
   executor for a headless agent would incorrectly equate model completion
