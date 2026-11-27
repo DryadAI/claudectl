@@ -353,6 +353,58 @@ fn protected_headless_claim_is_atomic_bound_and_never_self_verifies() {
         rusqlite::params![serde_json::to_string(&task.verifiers).unwrap(), task_id],
     )
     .unwrap();
+    use rusqlite::types::Value as SqlValue;
+    let drifted_fields = [
+        (
+            "prompt",
+            SqlValue::Text("forged prompt".into()),
+            SqlValue::Text(task.prompt.clone()),
+        ),
+        (
+            "role",
+            SqlValue::Text("forged role".into()),
+            task.role
+                .clone()
+                .map(SqlValue::Text)
+                .unwrap_or(SqlValue::Null),
+        ),
+        (
+            "model",
+            SqlValue::Text("paid-model".into()),
+            task.model
+                .clone()
+                .map(SqlValue::Text)
+                .unwrap_or(SqlValue::Null),
+        ),
+        (
+            "budget_usd",
+            SqlValue::Real(50.0),
+            task.budget_usd
+                .map(SqlValue::Real)
+                .unwrap_or(SqlValue::Null),
+        ),
+        (
+            "timeout_min",
+            SqlValue::Integer(999),
+            SqlValue::Integer(i64::from(task.timeout_min)),
+        ),
+        (
+            "max_retries",
+            SqlValue::Integer(99),
+            SqlValue::Integer(i64::from(task.max_retries)),
+        ),
+    ];
+    for (field, forged, original) in drifted_fields {
+        let update = format!("UPDATE tasks SET {field}=?1 WHERE id=?2");
+        conn.execute(&update, rusqlite::params![forged, task_id])
+            .unwrap();
+        assert!(
+            claim(&mut conn, 1, &digest).is_err(),
+            "{field} drift accepted"
+        );
+        conn.execute(&update, rusqlite::params![original, task_id])
+            .unwrap();
+    }
     assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 0);
 
     let claimed = claim(&mut conn, 1, &digest).unwrap().unwrap();

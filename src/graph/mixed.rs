@@ -486,9 +486,7 @@ fn claim_headless_at(
     {
         return Err("headless claim requires declared deterministic verification".into());
     }
-    if task.verifiers != super::durable::agent_request(node)?.verify {
-        return Err("headless verifier list differs from compiled graph".into());
-    }
+    super::durable::validate_headless_task_binding(node, &task)?;
     let worktree = crate::coord::workspace::existing_task_workspace_at(&task, worktree_root)?
         .ok_or("headless isolated worktree is not recorded")?;
     let remote = Command::new("git")

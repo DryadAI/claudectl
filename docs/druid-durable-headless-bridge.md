@@ -30,8 +30,9 @@ transient unit, or protected policy is enabled by this change.
   point requires a root supervisor, protected active policy, exact snapshot
   digest, canonical compiled graph, satisfied dependencies, isolated recorded
   worktree, repository grant, deterministic verifier declaration, and both
-  graph and policy retry ceilings. The task's verifier list must equal the
-  compiled graph's declaration, and the claim records a SHA-256 digest of the
+  graph and policy retry ceilings. The task's projected prompt, role,
+  model, budget, timeout, retry and verifier fields must equal the compiled
+  graph's declaration, and the claim records a SHA-256 digest of the
   accepted protected policy alongside its bounds. The claim and `Running` transition commit
   in one immediate transaction. Duplicate/stale claims return no new attempt;
   an old claim cannot authorize a later retry. This is durable ledger state,
