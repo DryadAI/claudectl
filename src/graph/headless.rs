@@ -175,7 +175,7 @@ mod tests {
     use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, time::Duration};
 
     #[test]
-    fn existing_graph_runner_executes_fake_headless_worker_and_records_derived_evidence() {
+    fn unbounded_fake_worker_cannot_run_through_graph_adapter() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("fake-claude");
         std::fs::write(&exe, "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"permission_denials\":[],\"session_id\":\"fake-1\",\"result\":\"untrusted prose\",\"total_cost_usd\":0.01}'\n").unwrap();
@@ -230,12 +230,11 @@ mod tests {
         let compiled = compile(graph).unwrap();
         let report =
             runner::run_with_registry(&compiled, &registry, &dir.path().join("evidence")).unwrap();
-        assert!(report.succeeded());
+        assert!(!report.succeeded());
         let evidence =
             std::fs::read_to_string(std::path::Path::new(&report.run_dir).join("evidence.jsonl"))
                 .unwrap();
-        assert!(evidence.contains("derived"));
-        assert!(evidence.contains("NOT independently verified"));
+        assert!(evidence.contains("headless worker requires a host resource boundary"));
         assert!(!evidence.contains("untrusted prose"));
 
         let node = &compiled.spec.nodes[0];

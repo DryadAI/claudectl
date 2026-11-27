@@ -26,10 +26,10 @@ with a cleared environment. A unique per-attempt unit name lets cancellation
 request `systemctl stop`; the unit runtime limit is a second backstop if the
 supervisor dies. This is the intended execution boundary, not a live durable
 graph route: durable V1 explicitly rejects `claude_code_headless` agent nodes,
-and its agent path uses the existing session supervisor. The headless adapter
-has only been exercised through the non-durable graph runner with a fake CLI.
-Do not infer durable scheduling, retry or evidence integration for it from
-those adapter tests. A separate reviewed bridge must preserve the existing
+and its agent path uses the existing session supervisor. The non-durable graph
+runner now rejects a fake CLI without host resource limits; lower-level core
+unit tests still exercise fake transport. Do not infer durable scheduling,
+retry or evidence integration from those tests. A separate reviewed bridge must preserve the existing
 supervisor's dependencies, retries, approval and evidence authority before
 headless registration.
 
@@ -57,8 +57,9 @@ recovery/idempotence must be proven with a disposable graph.
 Offline evidence: `cargo test -p claudectl-core --lib headless::`,
 `cargo test --lib graph::`, targeted Clippy and `git diff --check`. A regression
 test confirms durable submission of a headless agent fails atomically rather
-than silently changing launch paths. These tests check argv and fake transport
-behavior; they do not create a real systemd unit.
+than silently changing launch paths. These tests check argv, fail-closed graph
+registration and fake core transport behavior; they do not create a real
+systemd unit.
 
 References: [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html),
 [systemd.resource-control](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html),
