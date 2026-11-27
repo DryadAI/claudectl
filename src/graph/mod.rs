@@ -7,6 +7,8 @@ pub mod durable;
 // Public library adapter; deliberately not registered in the embedded CLI yet.
 #[allow(dead_code)]
 pub mod headless;
+#[cfg(all(feature = "coord", target_os = "linux"))]
+pub(crate) mod headless_broker;
 pub mod master;
 #[cfg(feature = "coord")]
 pub mod mixed;
