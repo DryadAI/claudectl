@@ -505,6 +505,59 @@ fn durable_submission_keeps_headless_provider_inactive() {
 }
 
 #[test]
+fn legacy_session_action_never_accepts_headless_or_non_agent_executor() {
+    let mut node = graph(
+        vec![json!({
+            "id":"candidate", "kind":"agent", "requires":["agent.execute"],
+            "workspace":{"mode":"worktree"},
+            "executor":{"kind":"provider","capability":"agent.execute",
+                "provider":"claude_code","request":{"cwd":".","prompt":"test"}}
+        })],
+        &[],
+    )
+    .spec
+    .nodes
+    .remove(0);
+    assert!(is_legacy_session_agent(&node));
+    if let Some(ExecutorSpec::Provider { provider, .. }) = &mut node.executor {
+        *provider = None;
+    }
+    assert!(is_legacy_session_agent(&node));
+    if let Some(ExecutorSpec::Provider { provider, .. }) = &mut node.executor {
+        *provider = Some("claude_code_headless".into());
+    }
+    assert!(!is_legacy_session_agent(&node));
+    node.kind = NodeKind::Tool;
+    assert!(!is_legacy_session_agent(&node));
+}
+
+#[test]
+fn graph_task_without_snapshot_never_falls_back_to_legacy_session() {
+    let mut conn = store::open_memory();
+    let agent = json!({
+        "id":"agent", "kind":"agent", "requires":["agent.execute"],
+        "workspace":{"mode":"worktree"},
+        "executor":{"kind":"provider","capability":"agent.execute",
+            "provider":"claude_code","request":{"cwd":".","prompt":"test"}}
+    });
+    let submission = submit(&mut conn, &graph(vec![agent], &[]));
+    let task_id = &submission.task_ids["agent"];
+    conn.execute(
+        "DELETE FROM graph_snapshots WHERE run_id = ?1",
+        [&submission.graph_run_id],
+    )
+    .unwrap();
+    conn.execute("UPDATE tasks SET policy = NULL WHERE id = ?1", [task_id])
+        .unwrap();
+    let task = tasks::get_task(&conn, task_id).unwrap().unwrap();
+    assert_eq!(
+        require_legacy_session_agent(&conn, &task).unwrap_err(),
+        "graph task is missing its required snapshot"
+    );
+    assert!(Supervisor::with_defaults().tick(&conn, &Quiet).is_err());
+}
+
+#[test]
 fn unsupported_typed_transport_and_subgraphs_are_rejected() {
     let mut conn = store::open_memory();
     let mut g = graph(vec![provider("read"), gate()], &[("read", "approve")]);

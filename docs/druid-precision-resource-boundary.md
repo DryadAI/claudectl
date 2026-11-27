@@ -33,6 +33,16 @@ retry or evidence integration from those tests. A separate reviewed bridge must 
 supervisor's dependencies, retries, approval and evidence authority before
 headless registration.
 
+As an additional fail-closed guard, the actuator rechecks a graph agent's
+stored provider before any legacy session action. Only the existing
+`claude_code` provider (or the canonical default) may use that lane; a future
+`claude_code_headless` admission cannot silently fall through to `Spawn`,
+`Retry`, or verifier/session-policy actions. This guard does not implement the
+new lane or enable the provider.
+Likewise, a task with a graph-run identity but a missing execution snapshot
+fails closed even if its policy marker is absent; it is never reinterpreted as
+a legacy task.
+
 Before `setpriv`, the transient service takes a nonblocking exclusive lock on
 `/run/druid-worker-concurrency.lock` via root-owned `/usr/bin/flock`. A second
 service exits before worker execution while the slot is held. The lock belongs
