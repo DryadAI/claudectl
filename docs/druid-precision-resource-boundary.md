@@ -32,6 +32,9 @@ unit tests still exercise fake transport. Do not infer durable scheduling,
 retry or evidence integration from those tests. A separate reviewed bridge must preserve the existing
 supervisor's dependencies, retries, approval and evidence authority before
 headless registration.
+The separate [durable bridge contract](druid-durable-headless-bridge.md)
+specifies the state and evidence gates that must be reviewed before that
+registration can occur.
 
 As an additional fail-closed guard, the actuator rechecks a graph agent's
 stored provider before any legacy session action. Only the existing
