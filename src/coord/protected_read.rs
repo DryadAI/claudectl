@@ -20,14 +20,14 @@ const MAX_REQUEST_BYTES: usize = 256;
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadRequest {
-    version: u8,
-    operation: ReadOperation,
-    id: String,
+    pub(crate) version: u8,
+    pub(crate) operation: ReadOperation,
+    pub(crate) id: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum ReadOperation {
+pub(crate) enum ReadOperation {
     TaskState,
     GraphState,
 }
@@ -75,7 +75,7 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, String> {
     Ok(credentials.uid)
 }
 
-fn validate_fields(request: &ReadRequest) -> Result<(), String> {
+pub(crate) fn validate_fields(request: &ReadRequest) -> Result<(), String> {
     let prefix = match request.operation {
         ReadOperation::TaskState => "task_",
         ReadOperation::GraphState => "graph_",

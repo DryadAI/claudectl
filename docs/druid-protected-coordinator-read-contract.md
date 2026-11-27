@@ -1,7 +1,7 @@
 # Proposed protected coordinator read contract
 
-Status: **source-only protocol; no socket, service, CLI client, SQLite open or
-running endpoint**. This is the first narrow slice of the whole-ledger cutover
+Status: **source-only protocol; no socket, service, CLI client or running
+endpoint**. This is the first narrow slice of the whole-ledger cutover
 outlined in `druid-protected-coordinator-cutover.md`, not an activation step.
 
 `coord::protected_read` accepts one length-prefixed JSON request from a Linux
@@ -23,8 +23,13 @@ prompts, policies, worktree paths, evidence payloads or credentials. The
 current dispatcher **always rejects**, so the response type is a design
 constraint rather than a claim that status can already be queried.
 
-Before a service can use this protocol, it needs a protected ledger opener,
-exact per-operation peer authorization, a read-only projection implementation,
+`druid-protected-coordinator-store.md` describes a later source-only guarded
+opener and projection implementation. It does not make this wire dispatcher
+or a service active.
+
+Before a service can use this protocol, it needs a host-proven protected ledger
+opener and projection (the source-only versions are not host proof),
+exact per-operation peer authorization,
 bounded response framing, one-request-per-connection closure, resource limits
 and tests against a disposable protected identity/storage layout. Writes and
 the existing supervisor scheduler require separate design and review. The

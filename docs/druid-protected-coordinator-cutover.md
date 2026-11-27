@@ -76,5 +76,7 @@ API, but these values require an explicit reviewed host design. No current
 source endpoint or SDK implements this contract.
 
 The staged read-only request shape is in
-`druid-protected-coordinator-read-contract.md`. It has no listener or ledger
+`druid-protected-coordinator-read-contract.md`. Its parser has no listener or ledger
 access and cannot be treated as a working coordinator service.
+`druid-protected-coordinator-store.md` adds source-only guarded read access
+and redacted projections; it still has no production caller or host proof.
