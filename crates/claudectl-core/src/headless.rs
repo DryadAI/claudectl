@@ -31,8 +31,8 @@ pub struct WorkerConfig {
     /// Mandatory OS boundary.  This is deliberately trusted host input, not
     /// graph data: a worker cannot select a looser launcher or mount set.
     pub sandbox: SandboxConfig,
-    /// A protected host choice. Production providers must require this;
-    /// direct Bubblewrap remains available only to offline transport tests.
+    /// A protected host choice. Production transport requires this;
+    /// direct Bubblewrap remains available only to offline unit tests.
     pub resources: Option<ResourceLimits>,
 }
 
@@ -366,6 +366,7 @@ pub fn run(
     if cancel.load(Ordering::SeqCst) {
         return Err("worker cancelled".into());
     }
+    require_resource_boundary(config.resources.is_some(), cfg!(test))?;
     let (mut command, unit) = config.launch_command()?;
     let mut process = Process(
         command
@@ -446,6 +447,13 @@ pub fn run(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn require_resource_boundary(has_resources: bool, unit_test_build: bool) -> Result<(), String> {
+    if !has_resources && !unit_test_build {
+        return Err("headless worker requires a host resource boundary".into());
+    }
+    Ok(())
 }
 
 fn parse_result(bytes: &[u8], budget: f64) -> Result<WorkerResult, String> {

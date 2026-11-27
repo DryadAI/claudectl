@@ -176,6 +176,13 @@ fn resource_contract_is_bounded_and_transient_service_is_exact() {
 }
 
 #[test]
+fn production_transport_rejects_missing_resource_boundary() {
+    assert!(require_resource_boundary(false, false).is_err());
+    assert!(require_resource_boundary(true, false).is_ok());
+    assert!(require_resource_boundary(false, true).is_ok());
+}
+
+#[test]
 fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
     let (_dir, mut config) = fixture("exit 0");
     config

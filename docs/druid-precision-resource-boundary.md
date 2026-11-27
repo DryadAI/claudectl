@@ -3,10 +3,11 @@
 Status: code and offline tests only. No worker, model, transient systemd unit,
 protected policy, or durable provider was activated by this change.
 
-The headless adapter remains unregistered. In a production build, it rejects a
-`WorkerConfig` without host-supplied resource limits. This is not graph input.
-The core's direct Bubblewrap path remains for disposable transport tests; it is
-not an activation path. The limits are bounded to 64 MiB–2 GiB memory, 8–128
+The headless adapter remains unregistered. In a production build, both the
+adapter and the lower-level `run` transport reject a `WorkerConfig` without
+host-supplied resource limits. This is not graph input. The core's direct
+Bubblewrap path remains only for unit-test builds, not activation. The limits
+are bounded to 64 MiB–2 GiB memory, 8–128
 tasks, and 1–100% of one CPU. The existing transport still enforces its own
 deadline, output cap, turn cap, and CLI budget.
 The adapter also rejects graph retry declarations and actual attempt numbers
