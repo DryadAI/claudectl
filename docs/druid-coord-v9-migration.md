@@ -27,9 +27,10 @@ Before any live cutover:
    stop for manual reconciliation; never drop or synthesize them.
 
 The coordinator directory is owner-only (`0700`) and the DB file is `0600`
-when opened by the v9 store. The default operator-profile `store::open()`
-refuses effective UID 0; it is not a shortcut for a future root broker. That
-broker needs a separately reviewed protected coordinator service and narrow
+when opened by the v9 store. Both default operator-profile entrypoints,
+`store::open()` and `store::open_read_only()`, refuse effective UID 0; even
+a read-only SQLite connection to the operator ledger is not a shortcut for a
+future root broker. A broker needs a separately reviewed protected coordinator service and narrow
 local API. An existing live DB or its WAL/SHM sidecars must
 not be copied into a repository. This procedure is not proof of reboot
 persistence, root-broker support, worker policy, or production activation.

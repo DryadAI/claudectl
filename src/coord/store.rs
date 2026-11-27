@@ -104,6 +104,12 @@ const HEADLESS_CLAIMS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS graph_headle
 
 /// Open (or create) the coordination database and run migrations.
 pub fn open() -> Result<Connection, String> {
+    ensure_operator_profile_open_allowed()?;
+    let path = db_path();
+    open_at(&path)
+}
+
+fn ensure_operator_profile_open_allowed() -> Result<(), String> {
     #[cfg(unix)]
     if !operator_profile_open_allowed(unsafe { libc::geteuid() }) {
         return Err(
@@ -111,8 +117,7 @@ pub fn open() -> Result<Connection, String> {
                 .into(),
         );
     }
-    let path = db_path();
-    open_at(&path)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -159,6 +164,7 @@ fn open_at(path: &std::path::Path) -> Result<Connection, String> {
 
 /// Inspect an existing ledger without creating directories or migrating its schema.
 pub fn open_read_only() -> Result<Connection, String> {
+    ensure_operator_profile_open_allowed()?;
     open_read_only_at(&db_path())
 }
 
@@ -1622,6 +1628,22 @@ mod tests {
     fn operator_profile_open_refuses_root_identity() {
         assert!(!operator_profile_open_allowed(0));
         assert!(operator_profile_open_allowed(1000));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn both_operator_profile_entrypoints_enforce_the_same_identity_gate() {
+        // The public entrypoints must share one preflight before either path
+        // calculation or SQLite open. The explicit-path helpers are for
+        // disposable tests and are never root-broker entrypoints.
+        let gate = ensure_operator_profile_open_allowed();
+        if unsafe { libc::geteuid() } == 0 {
+            assert!(gate.is_err());
+            assert!(open().is_err());
+            assert!(open_read_only().is_err());
+        } else {
+            assert!(gate.is_ok());
+        }
     }
 
     #[test]
