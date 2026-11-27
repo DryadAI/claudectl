@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ use super::provider::ProviderRegistry;
 use super::runner::EvidenceRecord;
 use super::runner::{ArtifactAttestation, ArtifactState, EvidenceConfidence};
 use super::schema::{ExecutorSpec, NodeKind, NodeSpec, Outcome, RiskLevel, WorkspaceMode};
+use super::standing_policy::{self, PermitRoute};
 use crate::coord::tasks::{self, TaskRow, TaskState};
 
 const ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -370,6 +372,221 @@ fn classify_agent_lane(node: &NodeSpec) -> Result<Option<AgentLane>, String> {
     }
 }
 
+/// A recorded claim, not a launch authorization. An interrupted claim remains
+/// Running and must be reconciled by the future unit/cgroup-aware worker path.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct HeadlessClaim {
+    pub attempt_id: String,
+    pub task_id: String,
+    pub attempt: u32,
+    pub snapshot_digest: String,
+    pub policy_id: String,
+    pub worktree: PathBuf,
+}
+
+/// Production entry point: only a root supervisor may read protected policy
+/// and claim an attempt. This is not wired to the actuator or CLI yet.
+#[allow(dead_code)]
+pub(crate) fn claim_headless(
+    conn: &mut Connection,
+    task_id: &str,
+    expected_attempt: u32,
+    expected_snapshot_digest: &str,
+    policy_path: &Path,
+    revocations_path: &Path,
+    worktree_root: &Path,
+) -> Result<Option<HeadlessClaim>, String> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("headless claim requires a root supervisor".into());
+    }
+    claim_headless_at(
+        conn,
+        task_id,
+        expected_attempt,
+        expected_snapshot_digest,
+        policy_path,
+        revocations_path,
+        worktree_root,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn claim_headless_at(
+    conn: &mut Connection,
+    task_id: &str,
+    expected_attempt: u32,
+    expected_snapshot_digest: &str,
+    policy_path: &Path,
+    revocations_path: &Path,
+    worktree_root: &Path,
+    required_owner_uid: u32,
+) -> Result<Option<HeadlessClaim>, String> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let task = tasks::get_task(&tx, task_id)?.ok_or("headless task not found")?;
+    if agent_lane(&tx, &task)? != Some(AgentLane::Headless) {
+        return Err("task is not a stored headless graph agent".into());
+    }
+    if !matches!(task.state, TaskState::Pending | TaskState::Retrying)
+        || !dependencies_done(&tx, &task)?
+    {
+        return Ok(None);
+    }
+    let run_id = task
+        .graph_run_id
+        .as_deref()
+        .ok_or("headless run id missing")?;
+    let node_id = task
+        .graph_node_id
+        .as_deref()
+        .ok_or("headless node id missing")?;
+    let (snapshot_digest, snapshot) = snapshot(&tx, run_id)?.ok_or("headless snapshot missing")?;
+    if snapshot_digest != expected_snapshot_digest || expected_snapshot_digest.is_empty() {
+        return Err("headless snapshot digest differs from protected admission".into());
+    }
+    let rebuilt = super::compiler::compile(snapshot.compiled.spec.clone())
+        .map_err(|e| format!("headless graph is not canonical: {e}"))?;
+    if serde_json::to_value(&rebuilt).map_err(|e| e.to_string())?
+        != serde_json::to_value(&snapshot.compiled).map_err(|e| e.to_string())?
+    {
+        return Err("headless snapshot is not a canonical compiled graph".into());
+    }
+    let run_fingerprint: String = tx
+        .query_row(
+            "SELECT fingerprint FROM graph_runs WHERE id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("headless run fingerprint unavailable: {e}"))?;
+    if run_fingerprint != snapshot.compiled.fingerprint {
+        return Err("headless run fingerprint differs from stored graph".into());
+    }
+    let node = &snapshot
+        .nodes
+        .get(node_id)
+        .ok_or("headless prepared node missing")?
+        .node;
+    if node.kind != NodeKind::Agent
+        || node.workspace.mode != WorkspaceMode::Worktree
+        || node.authority.git_commit
+        || node.authority.git_push
+        || node.authority.network != super::schema::NetworkAuthority::Denied
+        || node.authority.filesystem_read != ["**"]
+        || node.authority.filesystem_write != ["**"]
+    {
+        return Err("headless claim requires bounded agent/worktree authority".into());
+    }
+    if task.verifiers.is_empty()
+        || task.verifiers.iter().any(|verifier| {
+            !matches!(verifier, crate::coord::verify::Verifier::Run { command } if !command.trim().is_empty())
+        })
+    {
+        return Err("headless claim requires declared deterministic verification".into());
+    }
+    let worktree = crate::coord::workspace::existing_task_workspace_at(&task, worktree_root)?
+        .ok_or("headless isolated worktree is not recorded")?;
+    let remote = Command::new("git")
+        .arg("-C")
+        .arg(&task.cwd)
+        .args(["config", "--local", "--get", "remote.origin.url"])
+        .output()
+        .map_err(|_| "headless repository remote lookup failed")?;
+    if !remote.status.success() {
+        return Err("headless repository has no local origin remote".into());
+    }
+    let repository_remote = String::from_utf8(remote.stdout)
+        .map_err(|_| "headless repository remote is not UTF-8")?
+        .trim()
+        .to_string();
+    if repository_remote.is_empty() {
+        return Err("headless repository remote is empty".into());
+    }
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "headless supervisor clock is invalid")?
+        .as_millis();
+    let (_, permit) = standing_policy::authorize(
+        policy_path,
+        revocations_path,
+        required_owner_uid,
+        now_unix_ms,
+        task_id,
+        &repository_remote,
+        "edit",
+    )?;
+    let attempt = tasks::attempt_count(&tx, task_id)? + 1;
+    if attempt != expected_attempt {
+        return Ok(None);
+    }
+    if attempt > node.retry.max_attempts
+        || attempt > permit.execution_bounds.max_retries.saturating_add(1)
+    {
+        return Err("headless attempt exceeds graph or protected retry ceiling".into());
+    }
+    let from_transition_id: i64 = tx
+        .query_row(
+            "SELECT id FROM task_transitions WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("headless task transition unavailable: {e}"))?;
+    let attempt_id = tasks::insert_attempt(&tx, task_id, attempt, None, None, None)?;
+    let route = match permit.route {
+        PermitRoute::Offline => "offline",
+        PermitRoute::RootOwnedLoopbackProxy => "root-owned-loopback-proxy",
+    };
+    let bounds = &permit.execution_bounds;
+    let bounds_json = serde_json::json!({
+        "timeout_seconds": bounds.timeout_seconds,
+        "max_output_bytes": bounds.max_output_bytes,
+        "max_turns": bounds.max_turns,
+        "max_budget_usd": bounds.max_budget_usd,
+        "max_retries": bounds.max_retries,
+    });
+    tx.execute(
+        "INSERT INTO graph_headless_claims
+         (attempt_id,task_id,attempt_num,run_id,node_id,snapshot_digest,policy_id,
+          repository_remote,worktree_path,route,bounds_json,from_transition_id,claimed_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            attempt_id,
+            task_id,
+            attempt,
+            run_id,
+            node_id,
+            snapshot_digest,
+            permit.policy_id,
+            repository_remote,
+            worktree.to_string_lossy(),
+            route,
+            bounds_json.to_string(),
+            from_transition_id,
+            crate::logger::timestamp_now(),
+        ],
+    )
+    .map_err(|e| format!("record headless claim: {e}"))?;
+    tasks::transition_in_transaction(
+        &tx,
+        task_id,
+        task.state,
+        TaskState::Running,
+        "graph-headless-claim",
+    )?;
+    tx.commit()
+        .map_err(|e| format!("commit headless claim: {e}"))?;
+    Ok(Some(HeadlessClaim {
+        attempt_id,
+        task_id: task_id.into(),
+        attempt,
+        snapshot_digest,
+        policy_id: permit.policy_id,
+        worktree,
+    }))
+}
+
 /// Session actions are the legacy Claude Code lane, never an implicit fallback
 /// for a graph node whose provider is changed to a headless worker. Recheck
 /// the stored snapshot at the effect boundary as well as at submission.
@@ -577,6 +794,44 @@ pub(crate) fn guard_transition(
         return Ok(());
     };
     if kind == NodeKind::Agent {
+        if agent_lane(conn, &task)? == Some(AgentLane::Headless) {
+            let valid = match (from, to) {
+                (TaskState::Pending | TaskState::Retrying, TaskState::Running) => {
+                    let attempt = tasks::attempt_count(conn, task_id)?;
+                    let from_transition_id: i64 = conn
+                        .query_row(
+                            "SELECT id FROM task_transitions WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
+                            [task_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| format!("check headless transition: {e}"))?;
+                    let claims: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM graph_headless_claims c
+                             JOIN task_attempts a ON a.id=c.attempt_id
+                             WHERE c.task_id=?1 AND c.attempt_num=?2
+                               AND c.from_transition_id=?3
+                               AND a.outcome IS NULL AND a.ended_at IS NULL",
+                            params![task_id, attempt, from_transition_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| format!("check headless claim: {e}"))?;
+                    attempt > 0 && claims == 1 && dependencies_done(conn, &task)?
+                }
+                (
+                    TaskState::Pending | TaskState::Retrying,
+                    TaskState::Cancelled | TaskState::NeedsHuman,
+                ) => true,
+                _ => false,
+            };
+            if !valid {
+                return Err(
+                    "headless transition requires its dedicated claim or reconciliation path"
+                        .into(),
+                );
+            }
+            return Ok(());
+        }
         if matches!(
             to,
             TaskState::Assigned

@@ -70,7 +70,8 @@ pub fn gen_id(prefix: &str) -> String {
 /// v5 = persisted task workspace path for isolated graph execution.
 /// v6 = per-attempt hook event cursor for race-free completion correlation.
 /// v7 = mixed graph snapshots, evidence, and digest-bound approval decisions.
-pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 7;
+/// v8 = headless attempt claim bindings (no worker activation).
+pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 8;
 
 /// Open (or create) the coordination database and run migrations.
 pub fn open() -> Result<Connection, String> {
@@ -434,6 +435,27 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             actor TEXT NOT NULL,
             reason TEXT NOT NULL,
             decided_at TEXT NOT NULL
+        );",
+    )?;
+
+    // Schema v8 — one durable, policy-bound claim per headless attempt.
+    // A claim is not permission to run a worker: the actuator remains inert.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS graph_headless_claims (
+            attempt_id TEXT PRIMARY KEY REFERENCES task_attempts(id),
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            attempt_num INTEGER NOT NULL,
+            run_id TEXT NOT NULL REFERENCES graph_runs(id),
+            node_id TEXT NOT NULL,
+            snapshot_digest TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            repository_remote TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            route TEXT NOT NULL CHECK (route IN ('offline', 'root-owned-loopback-proxy')),
+            bounds_json TEXT NOT NULL,
+            from_transition_id INTEGER NOT NULL REFERENCES task_transitions(id),
+            claimed_at TEXT NOT NULL,
+            UNIQUE(task_id, attempt_num)
         );",
     )?;
 

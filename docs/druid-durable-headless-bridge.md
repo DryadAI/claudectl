@@ -1,11 +1,12 @@
 # DRUID durable headless bridge — implementation contract
 
 Status: staged implementation, **not authorized for activation**. The
-supervisor now distinguishes the stored `claude_code_headless` provider and
-emits `ExecuteHeadlessNode` instead of a legacy session action. The actuator
-rejects that action before an attempt or external effect. Ordinary durable
-submission still rejects the provider. No worker, model, transient unit, or
-protected policy is enabled by this change.
+supervisor distinguishes the stored `claude_code_headless` provider and emits
+`ExecuteHeadlessNode` instead of a legacy session action. The actuator still
+rejects that action before an attempt or external effect. A separate, unwired
+root-supervisor claim function can atomically record a policy-bound attempt,
+but ordinary durable submission still rejects the provider. No worker, model,
+transient unit, or protected policy is enabled by this change.
 
 ## Current source boundary
 
@@ -24,6 +25,15 @@ protected policy is enabled by this change.
   with independent verification.
 - The non-durable `HeadlessProvider` transport produces a derived completion
   hash, not proof that candidate code or artifacts meet specifications.
+- Coordination schema v8 records a `graph_headless_claims` row against the
+  exact attempt and prior task transition. The unwired `claim_headless` entry
+  point requires a root supervisor, protected active policy, exact snapshot
+  digest, canonical compiled graph, satisfied dependencies, isolated recorded
+  worktree, repository grant, deterministic verifier declaration, and both
+  graph and policy retry ceilings. The claim and `Running` transition commit
+  in one immediate transaction. Duplicate/stale claims return no new attempt;
+  an old claim cannot authorize a later retry. This is durable ledger state,
+  **not** worker launch, verification, or production proof.
 
 ## Required transition contract
 
