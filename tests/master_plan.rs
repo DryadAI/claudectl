@@ -15,6 +15,9 @@ fn example() -> MasterPlan {
 #[test]
 fn cli_rejects_ambiguous_local_and_durable_evidence_sources() {
     let output = Command::new(env!("CARGO_BIN_EXE_claudectl"))
+        // These fixtures exercise the local graph CLI, not an isolated
+        // headless profile. The surrounding test runner may be isolated.
+        .env_remove("CLAUDECTL_PROFILE")
         .args([
             "graph",
             "master",
@@ -402,6 +405,7 @@ fn input_rejects_unknown_fields_including_claimed_completion() {
 
 fn cli(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_claudectl"))
+        .env_remove("CLAUDECTL_PROFILE")
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())

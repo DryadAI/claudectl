@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::session::{ClaudeSession, RawSession};
 
@@ -65,9 +65,15 @@ pub fn scan_sessions() -> Vec<ClaudeSession> {
 /// Resolve JSONL paths for sessions. Must be called AFTER command_args are populated
 /// (i.e., after fetch_ps_data), so we can use --resume UUIDs for correct mapping.
 pub fn resolve_jsonl_paths(sessions: &mut [ClaudeSession]) {
+    resolve_jsonl_paths_in(sessions, &projects_dir());
+}
+
+/// Resolve paths against an explicit Claude projects directory. Callers that
+/// already know the profile root can avoid process-global environment changes.
+pub fn resolve_jsonl_paths_in(sessions: &mut [ClaudeSession], projects_base: &Path) {
     for session in sessions.iter_mut() {
         let slug = cwd_to_slug(&session.cwd);
-        let project_dir = projects_dir().join(&slug);
+        let project_dir = projects_base.join(&slug);
 
         // Priority 1: Try the session's own ID in the expected project dir
         let own_path = project_dir.join(format!("{}.jsonl", session.session_id));
@@ -94,7 +100,7 @@ pub fn resolve_jsonl_paths(sessions: &mut [ClaudeSession]) {
         // Priority 4: Search ALL project directories for a JSONL matching the session ID.
         // This handles cwd encoding mismatches between claudectl and Claude Code
         // (e.g., symlink resolution, path normalization differences).
-        if let Some(found) = search_all_projects_for_session(&session.session_id) {
+        if let Some(found) = search_all_projects_for_session(&session.session_id, projects_base) {
             crate::logger::log(
                 "DEBUG",
                 &format!(
@@ -121,10 +127,9 @@ pub fn resolve_jsonl_paths(sessions: &mut [ClaudeSession]) {
 
 /// Search all directories under ~/.claude/projects/ for a JSONL file matching the session ID.
 /// This is a fallback when the cwd-based slug doesn't match the actual directory on disk.
-fn search_all_projects_for_session(session_id: &str) -> Option<PathBuf> {
+fn search_all_projects_for_session(session_id: &str, projects_base: &Path) -> Option<PathBuf> {
     let filename = format!("{session_id}.jsonl");
-    let base = projects_dir();
-    let entries = fs::read_dir(&base).ok()?;
+    let entries = fs::read_dir(projects_base).ok()?;
 
     for entry in entries.flatten() {
         let path = entry.path();

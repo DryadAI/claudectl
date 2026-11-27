@@ -27,11 +27,8 @@ fn db_path() -> PathBuf {
                 .to_path_buf()
         });
     #[cfg(not(test))]
-    let home = claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(home)
-        .join(".claudectl")
-        .join("bus")
-        .join("bus.db")
+    let home = PathBuf::from(claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into()));
+    home.join(".claudectl").join("bus").join("bus.db")
 }
 
 fn now_iso() -> String {

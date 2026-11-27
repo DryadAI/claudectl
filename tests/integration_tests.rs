@@ -932,27 +932,23 @@ fn recorder_cast_file_creation() {
 // ────────────────────────────────────────────────────────────────────────────
 // Transcript Discovery Tests (Issue #161)
 //
-// These tests mutate the HOME env var so projects_dir() resolves to a temp dir.
-// A mutex serializes them to prevent concurrent HOME changes across threads.
+// Transcript fixtures pass their projects directory explicitly, so an active
+// CLAUDECTL_PROFILE cannot redirect them away from the seeded files.
+// HOME_LOCK remains for the legacy outcome-reaper fixtures below.
 // ────────────────────────────────────────────────────────────────────────────
 
 use std::sync::Mutex;
 static HOME_LOCK: Mutex<()> = Mutex::new(());
 
-/// Helper: build a fake ~/.claude layout in a temp dir and run resolve_jsonl_paths.
-/// Holds HOME_LOCK for the duration.
+/// Helper: build a fake ~/.claude layout in a temp dir and resolve its JSONL.
 fn resolve_with_layout(
     cwd: &str,
     session_id: &str,
     slug_on_disk: &str,
 ) -> (ClaudeSession, tempfile::TempDir) {
-    let _guard = HOME_LOCK.lock().unwrap();
-
     let home = tempfile::tempdir().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    unsafe { std::env::set_var("HOME", home.path()) };
-
-    let project_dir = home.path().join(".claude/projects").join(slug_on_disk);
+    let projects_base = home.path().join(".claude/projects");
+    let project_dir = projects_base.join(slug_on_disk);
     std::fs::create_dir_all(&project_dir).unwrap();
     let jsonl_content = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","stop_reason":"end_turn","usage":{"input_tokens":1,"cache_creation_input_tokens":523,"cache_read_input_tokens":79425,"output_tokens":937}}}"#;
     std::fs::write(
@@ -968,12 +964,7 @@ fn resolve_with_layout(
         started_at: 1776421121745,
     };
     let mut session = ClaudeSession::from_raw(raw);
-    discovery::resolve_jsonl_paths(std::slice::from_mut(&mut session));
-
-    // Restore HOME
-    if let Some(h) = original_home {
-        unsafe { std::env::set_var("HOME", h) };
-    }
+    discovery::resolve_jsonl_paths_in(std::slice::from_mut(&mut session), &projects_base);
 
     (session, home)
 }
@@ -1019,18 +1010,15 @@ fn resolve_jsonl_cwd_with_hyphens() {
 
 #[test]
 fn resolve_jsonl_encoding_mismatch_fallback() {
-    let _guard = HOME_LOCK.lock().unwrap();
-
     let home = tempfile::tempdir().unwrap();
-    let original_home = std::env::var("HOME").ok();
-    unsafe { std::env::set_var("HOME", home.path()) };
+    let projects_base = home.path().join(".claude/projects");
 
     let session_id = "deadbeef-1234-5678-9abc-def012345678";
     let cwd = "/Users/testuser/projects/webapp";
 
     // JSONL under a slug that does NOT match cwd_to_slug(cwd)
     let wrong_slug = "-some-other-encoding-of-the-cwd";
-    let project_dir = home.path().join(".claude/projects").join(wrong_slug);
+    let project_dir = projects_base.join(wrong_slug);
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
@@ -1044,11 +1032,7 @@ fn resolve_jsonl_encoding_mismatch_fallback() {
         started_at: 0,
     };
     let mut session = ClaudeSession::from_raw(raw);
-    discovery::resolve_jsonl_paths(std::slice::from_mut(&mut session));
-
-    if let Some(h) = original_home {
-        unsafe { std::env::set_var("HOME", h) };
-    }
+    discovery::resolve_jsonl_paths_in(std::slice::from_mut(&mut session), &projects_base);
 
     assert!(
         session.jsonl_path.is_some(),
