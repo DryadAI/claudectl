@@ -6,6 +6,9 @@ on 2026-11-27. That approval does not install a service or approve executing a
 headless model. The ordinary durable graph submission and actuator remain
 closed to the headless provider.
 
+The proposed whole-ledger ownership and direct-client migration inventory is
+in `druid-protected-coordinator-cutover.md`. It does not activate this protocol.
+
 The existing coordination supervisor remains the scheduler and source of
 dependency, retry, and approval decisions. A future broker must not poll the
 graph or create a second scheduling loop. It may accept only an explicit action

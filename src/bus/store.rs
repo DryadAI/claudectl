@@ -15,11 +15,20 @@ use serde::{Deserialize, Serialize};
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn db_path() -> PathBuf {
-    let home = claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(home)
-        .join(".claudectl")
-        .join("bus")
-        .join("bus.db")
+    // Unit tests must never open or migrate the operator's live bus ledger.
+    #[cfg(test)]
+    let home = std::env::var_os("CLAUDECTL_PROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            static TEST_HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            TEST_HOME
+                .get_or_init(|| tempfile::tempdir().expect("private bus test home"))
+                .path()
+                .to_path_buf()
+        });
+    #[cfg(not(test))]
+    let home = PathBuf::from(claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into()));
+    home.join(".claudectl").join("bus").join("bus.db")
 }
 
 fn now_iso() -> String {
@@ -444,6 +453,13 @@ fn prune_cutoff(days: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_unit_test_store_is_not_the_operator_home() {
+        if std::env::var_os("CLAUDECTL_PROFILE").is_none() {
+            assert!(db_path().starts_with(std::env::temp_dir()));
+        }
+    }
 
     #[test]
     fn upserts_and_lists_roles() {

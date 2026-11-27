@@ -15,7 +15,7 @@ import stat
 import sys
 
 
-SCHEMA_VERSION = 8  # src/coord/store.rs::EXPECTED_COORD_SCHEMA_VERSION
+SCHEMA_VERSION = 9  # src/coord/store.rs::EXPECTED_COORD_SCHEMA_VERSION
 TABLE_COLUMNS = {
     "tasks": {"id", "graph_run_id", "graph_node_id"},
     "task_attempts": {"id", "task_id", "attempt_num"},

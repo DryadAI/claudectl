@@ -11,11 +11,21 @@ use super::types::*;
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn db_path() -> PathBuf {
-    let home = claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(home)
-        .join(".claudectl")
-        .join("coord")
-        .join("coord.db")
+    // Unit tests exercise callers that use the default store. Never let a
+    // cargo test run migrate an operator's real coordinator ledger.
+    #[cfg(test)]
+    let home = std::env::var_os("CLAUDECTL_PROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            static TEST_HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            TEST_HOME
+                .get_or_init(|| tempfile::tempdir().expect("private coordinator test home"))
+                .path()
+                .to_path_buf()
+        });
+    #[cfg(not(test))]
+    let home = PathBuf::from(claudectl_core::profile::home().unwrap_or_else(|| "/tmp".into()));
+    home.join(".claudectl").join("coord").join("coord.db")
 }
 
 fn now_iso() -> String {
@@ -71,15 +81,77 @@ pub fn gen_id(prefix: &str) -> String {
 /// v6 = per-attempt hook event cursor for race-free completion correlation.
 /// v7 = mixed graph snapshots, evidence, and digest-bound approval decisions.
 /// v8 = headless attempt claim bindings (no worker activation).
-pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 8;
+/// v9 = require the claim's exact prior transition; rebuild an empty legacy
+///       v8 claim table if it was created before this field existed.
+pub const EXPECTED_COORD_SCHEMA_VERSION: u32 = 9;
+
+const HEADLESS_CLAIMS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS graph_headless_claims (
+    attempt_id TEXT PRIMARY KEY REFERENCES task_attempts(id),
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    attempt_num INTEGER NOT NULL,
+    run_id TEXT NOT NULL REFERENCES graph_runs(id),
+    node_id TEXT NOT NULL,
+    snapshot_digest TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    repository_remote TEXT NOT NULL,
+    worktree_path TEXT NOT NULL,
+    route TEXT NOT NULL CHECK (route IN ('offline', 'root-owned-loopback-proxy')),
+    bounds_json TEXT NOT NULL,
+    from_transition_id INTEGER NOT NULL REFERENCES task_transitions(id),
+    claimed_at TEXT NOT NULL,
+    UNIQUE(task_id, attempt_num)
+);";
 
 /// Open (or create) the coordination database and run migrations.
 pub fn open() -> Result<Connection, String> {
+    ensure_operator_profile_open_allowed()?;
     let path = db_path();
+    open_at(&path)
+}
+
+fn ensure_operator_profile_open_allowed() -> Result<(), String> {
+    #[cfg(unix)]
+    if !operator_profile_open_allowed(unsafe { libc::geteuid() }) {
+        return Err(
+            "root cannot open an operator-profile coordinator DB; use a reviewed protected coordinator service"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn operator_profile_open_allowed(effective_uid: libc::uid_t) -> bool {
+    effective_uid != 0
+}
+
+fn open_at(path: &std::path::Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::symlink_metadata(parent).map_err(|e| format!("inspect dir: {e}"))?;
+            if !meta.file_type().is_dir() {
+                return Err("coord DB parent must be a real directory".into());
+            }
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("protect coord dir: {e}"))?;
+        }
     }
-    let conn = Connection::open(&path).map_err(|e| format!("open db: {e}"))?;
+    #[cfg(unix)]
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if !meta.file_type().is_file() {
+            return Err("coord DB must be a regular file".into());
+        }
+    }
+    let conn = Connection::open(path).map_err(|e| format!("open db: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("protect coord DB: {e}"))?;
+    }
     check_schema_version(&conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("WAL mode: {e}"))?;
@@ -92,6 +164,7 @@ pub fn open() -> Result<Connection, String> {
 
 /// Inspect an existing ledger without creating directories or migrating its schema.
 pub fn open_read_only() -> Result<Connection, String> {
+    ensure_operator_profile_open_allowed()?;
     open_read_only_at(&db_path())
 }
 
@@ -440,24 +513,36 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     // Schema v8 — one durable, policy-bound claim per headless attempt.
     // A claim is not permission to run a worker: the actuator remains inert.
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS graph_headless_claims (
-            attempt_id TEXT PRIMARY KEY REFERENCES task_attempts(id),
-            task_id TEXT NOT NULL REFERENCES tasks(id),
-            attempt_num INTEGER NOT NULL,
-            run_id TEXT NOT NULL REFERENCES graph_runs(id),
-            node_id TEXT NOT NULL,
-            snapshot_digest TEXT NOT NULL,
-            policy_id TEXT NOT NULL,
-            repository_remote TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            route TEXT NOT NULL CHECK (route IN ('offline', 'root-owned-loopback-proxy')),
-            bounds_json TEXT NOT NULL,
-            from_transition_id INTEGER NOT NULL REFERENCES task_transitions(id),
-            claimed_at TEXT NOT NULL,
-            UNIQUE(task_id, attempt_num)
-        );",
-    )?;
+    conn.execute_batch(HEADLESS_CLAIMS_TABLE_SQL)?;
+
+    // Early v8 binaries stamped the version even when this table lacked
+    // from_transition_id. Such claims cannot be safely bound to an exact
+    // transition after the fact. Repair only an empty legacy table; preserve
+    // and refuse any nonempty one for manual reconciliation.
+    let has_transition = conn
+        .prepare("PRAGMA table_info(graph_headless_claims)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "from_transition_id");
+    if !has_transition {
+        let claims: i64 =
+            conn.query_row("SELECT COUNT(*) FROM graph_headless_claims", [], |row| {
+                row.get(0)
+            })?;
+        if claims != 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        conn.execute_batch("BEGIN IMMEDIATE; DROP TABLE graph_headless_claims;")?;
+        let repair = conn
+            .execute_batch(HEADLESS_CLAIMS_TABLE_SQL)
+            .and_then(|_| conn.pragma_update(None, "user_version", EXPECTED_COORD_SCHEMA_VERSION))
+            .and_then(|_| conn.execute_batch("COMMIT;"));
+        if repair.is_err() {
+            let _ = conn.execute_batch("ROLLBACK;");
+        }
+        repair?;
+    }
 
     // Bump `user_version` last — table creation runs first so a partially
     // migrated DB never gets the version stamp; the gate then refuses to
@@ -1531,6 +1616,37 @@ mod tests {
     }
 
     #[test]
+    fn default_unit_test_store_is_not_the_operator_home() {
+        if std::env::var_os("CLAUDECTL_PROFILE").is_none() {
+            let path = db_path();
+            assert!(path.starts_with(std::env::temp_dir()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operator_profile_open_refuses_root_identity() {
+        assert!(!operator_profile_open_allowed(0));
+        assert!(operator_profile_open_allowed(1000));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn both_operator_profile_entrypoints_enforce_the_same_identity_gate() {
+        // The public entrypoints must share one preflight before either path
+        // calculation or SQLite open. The explicit-path helpers are for
+        // disposable tests and are never root-broker entrypoints.
+        let gate = ensure_operator_profile_open_allowed();
+        if unsafe { libc::geteuid() } == 0 {
+            assert!(gate.is_err());
+            assert!(open().is_err());
+            assert!(open_read_only().is_err());
+        } else {
+            assert!(gate.is_ok());
+        }
+    }
+
+    #[test]
     fn readonly_open_never_creates_or_migrates_a_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing/coord.db");
@@ -1563,6 +1679,80 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(v, EXPECTED_COORD_SCHEMA_VERSION);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_disk_coord_ledger_is_owner_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let coord = dir.path().join("coord");
+        let path = coord.join("coord.db");
+        let conn = open_at(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&coord).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(conn);
+    }
+
+    #[test]
+    fn empty_legacy_v8_claim_table_is_rebuilt_at_v9() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version=8;
+             CREATE TABLE graph_headless_claims (
+                 attempt_id TEXT PRIMARY KEY,
+                 task_id TEXT NOT NULL,
+                 attempt_num INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(graph_headless_claims)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(columns.contains(&"from_transition_id".to_string()));
+        migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn nonempty_legacy_v8_claim_table_refuses_destructive_rebuild() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version=8;
+             CREATE TABLE graph_headless_claims (
+                 attempt_id TEXT PRIMARY KEY,
+                 task_id TEXT NOT NULL,
+                 attempt_num INTEGER NOT NULL
+             );
+             INSERT INTO graph_headless_claims VALUES ('a', 't', 1);",
+        )
+        .unwrap();
+        assert!(migrate(&conn).is_err());
+        let claims: i64 = conn
+            .query_row("SELECT COUNT(*) FROM graph_headless_claims", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(claims, 1);
+        assert_eq!(version, 8);
     }
 
     #[test]

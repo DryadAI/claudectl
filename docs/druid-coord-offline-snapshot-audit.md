@@ -19,7 +19,7 @@ otherwise it exits 1. It rejects missing files, symlinks/hardlinks, and adjacent
 `-wal`/`-shm` files. SQLite opens the supplied copy with `mode=ro`, `immutable=1`,
 and `query_only=ON`; the script never creates, migrates, or repairs a database.
 
-Checks: exact schema v8 and required tables/columns; SQLite `quick_check` and
+Checks: exact schema v9 and required tables/columns; SQLite `quick_check` and
 foreign-key check; table row counts; SHA-256 of the exact persisted snapshot JSON;
 snapshot payload version and compiled fingerprint against `graph_runs`; graph
 task/snapshot presence; and claim bindings to task, attempt, transition, run,
