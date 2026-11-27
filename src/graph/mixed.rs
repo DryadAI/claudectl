@@ -486,6 +486,9 @@ fn claim_headless_at(
     {
         return Err("headless claim requires declared deterministic verification".into());
     }
+    if task.verifiers != super::durable::agent_request(node)?.verify {
+        return Err("headless verifier list differs from compiled graph".into());
+    }
     let worktree = crate::coord::workspace::existing_task_workspace_at(&task, worktree_root)?
         .ok_or("headless isolated worktree is not recorded")?;
     let remote = Command::new("git")
@@ -508,7 +511,7 @@ fn claim_headless_at(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "headless supervisor clock is invalid")?
         .as_millis();
-    let (_, permit) = standing_policy::authorize(
+    let (policy, permit) = standing_policy::authorize(
         policy_path,
         revocations_path,
         required_owner_uid,
@@ -539,7 +542,14 @@ fn claim_headless_at(
         PermitRoute::RootOwnedLoopbackProxy => "root-owned-loopback-proxy",
     };
     let bounds = &permit.execution_bounds;
+    // Preserve the exact accepted policy content for later audit without
+    // placing any policy material in the worker's worktree.
+    let policy_sha256 = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&policy).map_err(|e| e.to_string())?)
+    );
     let bounds_json = serde_json::json!({
+        "policy_sha256": policy_sha256,
         "timeout_seconds": bounds.timeout_seconds,
         "max_output_bytes": bounds.max_output_bytes,
         "max_turns": bounds.max_turns,

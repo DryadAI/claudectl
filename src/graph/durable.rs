@@ -13,7 +13,7 @@ pub const AGENT_EXECUTE_CAPABILITY: &str = "agent.execute";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AgentTaskRequest {
+pub(crate) struct AgentTaskRequest {
     cwd: String,
     prompt: String,
     #[serde(default)]
@@ -25,7 +25,7 @@ struct AgentTaskRequest {
     #[serde(default)]
     timeout_min: Option<u32>,
     #[serde(default)]
-    verify: Vec<Verifier>,
+    pub(crate) verify: Vec<Verifier>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -431,7 +431,7 @@ fn validate_durable_graph(compiled: &CompiledGraph) -> Result<(), String> {
     Ok(())
 }
 
-fn agent_request(node: &NodeSpec) -> Result<AgentTaskRequest, String> {
+pub(crate) fn agent_request(node: &NodeSpec) -> Result<AgentTaskRequest, String> {
     let ExecutorSpec::Provider { request, .. } = node
         .executor
         .as_ref()

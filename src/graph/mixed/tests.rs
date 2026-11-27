@@ -342,6 +342,17 @@ fn protected_headless_claim_is_atomic_bound_and_never_self_verifies() {
     tasks::set_workspace_path(&conn, task_id, repo.path().to_str().unwrap()).unwrap();
     assert!(claim(&mut conn, 1, &digest).is_err());
     tasks::set_workspace_path(&conn, task_id, workspace.to_str().unwrap()).unwrap();
+    conn.execute(
+        "UPDATE tasks SET verifiers=?1 WHERE id=?2",
+        rusqlite::params![r#"[{"kind":"run","command":"true"}]"#, task_id],
+    )
+    .unwrap();
+    assert!(claim(&mut conn, 1, &digest).is_err());
+    conn.execute(
+        "UPDATE tasks SET verifiers=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_string(&task.verifiers).unwrap(), task_id],
+    )
+    .unwrap();
     assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 0);
 
     let claimed = claim(&mut conn, 1, &digest).unwrap().unwrap();
@@ -354,16 +365,33 @@ fn protected_headless_claim_is_atomic_bound_and_never_self_verifies() {
     assert_eq!(tasks::attempt_count(&conn, task_id).unwrap(), 1);
     assert!(claim(&mut conn, 1, &digest).unwrap().is_none());
     assert!(claim(&mut conn, 2, &digest).unwrap().is_none());
-    let recorded: (String, String) = conn
+    let recorded: (String, String, String) = conn
         .query_row(
-            "SELECT snapshot_digest,worktree_path FROM graph_headless_claims WHERE attempt_id=?1",
+            "SELECT snapshot_digest,worktree_path,bounds_json FROM graph_headless_claims WHERE attempt_id=?1",
             [&claimed.attempt_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
+    assert_eq!(recorded.0, digest);
+    assert_eq!(recorded.1, workspace.to_string_lossy());
+    let accepted_policy = standing_policy::authorize(
+        &policy_path,
+        &revocations_path,
+        uid,
+        now,
+        task_id,
+        "https://github.com/DryadAI/claudectl",
+        "edit",
+    )
+    .unwrap()
+    .0;
+    let expected_policy_sha256 = format!(
+        "sha256:{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&accepted_policy).unwrap())
+    );
     assert_eq!(
-        recorded,
-        (digest.clone(), workspace.to_string_lossy().into_owned())
+        serde_json::from_str::<Value>(&recorded.2).unwrap()["policy_sha256"],
+        expected_policy_sha256
     );
     assert!(
         tasks::transition(
