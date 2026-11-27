@@ -38,6 +38,13 @@ has no authority. A future broker must load, authenticate and revoke the
 protected admission itself before using its contents. A protected admission
 is narrower than a standing policy: the policy authorizes a class of bounded
 development operations, while admission binds one task and graph snapshot.
+The source also stages a Linux file-descriptor reader for an absolute,
+root-owned admission path. It walks from `/` with `openat(O_NOFOLLOW)`, checks
+each directory's owner and writable bits, then requires a root-owned, private
+regular file and reads no more than 4 KiB from the verified descriptor. This
+avoids a metadata-check/path-read swap for **that admission file only**. It
+does not yet authenticate the existing standing-policy/revocation loader,
+which remains a separate review gate before a root broker may use it.
 
 ## Required design gate before wiring
 

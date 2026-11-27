@@ -11,15 +11,21 @@
 // implementation can consume it safely.
 #![allow(dead_code)]
 
+use std::ffi::{OsStr, c_int};
+use std::fs::File;
 use std::io::Read;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use serde::Deserialize;
 
 const MAX_FRAME_BYTES: usize = 512;
 const PROTOCOL_VERSION: u8 = 1;
+const MAX_ADMISSION_BYTES: u64 = 4096;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +66,88 @@ fn is_lower_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn open_child(parent: &File, name: &OsStr, directory: bool) -> Result<File, String> {
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| "protected admission path is invalid")?;
+    let flags = libc::O_RDONLY
+        | libc::O_CLOEXEC
+        | libc::O_NOFOLLOW
+        | if directory { libc::O_DIRECTORY } else { 0 };
+    // SAFETY: `parent` owns a valid directory FD; the CString is NUL-terminated.
+    let fd: c_int = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err("protected admission path could not be opened safely".into());
+    }
+    // SAFETY: openat returned a fresh FD owned exclusively by this File.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn require_owner(file: &File, owner_uid: u32, directory: bool) -> Result<(), String> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| "protected admission metadata unavailable")?;
+    if metadata.uid() != owner_uid
+        || metadata.mode() & 0o022 != 0
+        || if directory {
+            !metadata.is_dir()
+        } else {
+            !metadata.is_file() || metadata.mode() & 0o077 != 0
+        }
+    {
+        return Err("protected admission ownership or mode is unsafe".into());
+    }
+    Ok(())
+}
+
+/// Open every component beneath a trusted directory FD. Each directory must
+/// be owned by the expected owner and not group/other writable. The final
+/// regular file must additionally be private. openat(O_NOFOLLOW) and FD-based
+/// reads prevent a caller-controlled symlink or path swap from changing the
+/// inode after verification. The production wrapper anchors at `/` and UID 0.
+fn read_protected_beneath(root: &File, relative: &Path, owner_uid: u32) -> Result<Vec<u8>, String> {
+    if relative.is_absolute() {
+        return Err("protected admission path must be relative to trusted root".into());
+    }
+    let names: Vec<&OsStr> = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name),
+            _ => Err("protected admission path traversal is forbidden".into()),
+        })
+        .collect::<Result<_, String>>()?;
+    let (last, parents) = names
+        .split_last()
+        .ok_or("protected admission path is empty")?;
+    require_owner(root, owner_uid, true)?;
+    let mut dir = root.try_clone().map_err(|_| "protected root unavailable")?;
+    for name in parents {
+        dir = open_child(&dir, name, true)?;
+        require_owner(&dir, owner_uid, true)?;
+    }
+    let mut file = open_child(&dir, last, false)?;
+    require_owner(&file, owner_uid, false)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_ADMISSION_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "protected admission read failed")?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_ADMISSION_BYTES {
+        return Err("protected admission size is invalid".into());
+    }
+    Ok(bytes)
+}
+
+/// This only authenticates file origin and returns bytes. The caller must
+/// still validate exact contents, revocation, current policy, task state and
+/// ledger claim before any effect. No production caller exists yet.
+pub(crate) fn load_protected_admission_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let relative = path
+        .strip_prefix("/")
+        .map_err(|_| "protected admission path must be absolute")?;
+    let root = File::open("/").map_err(|_| "protected root unavailable")?;
+    read_protected_beneath(&root, relative, 0)
+}
+
 /// Validate the *contents* of a protected admission against the requested
 /// task and the independently accepted policy. Does not read the file, check
 /// its owner, inspect the coordination DB, or claim/launch an attempt.
@@ -70,7 +158,7 @@ pub(crate) fn validate_protected_admission(
     repository_remote: &str,
     now_unix_ms: u128,
 ) -> Result<ProtectedAdmission, String> {
-    if bytes.is_empty() || bytes.len() > 4096 {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_ADMISSION_BYTES {
         return Err("protected admission size is invalid".into());
     }
     let admission: ProtectedAdmission =
@@ -191,6 +279,7 @@ pub(crate) fn dispatch_inert(_intent: &BrokerIntent) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn valid() -> Vec<u8> {
         serde_json::json!({
@@ -331,5 +420,39 @@ mod tests {
         assert!(
             validate_protected_admission(&valid_admission(), &intent2, &policy, repo, 99).is_err()
         );
+    }
+
+    #[test]
+    fn protected_reader_rejects_symlink_writable_file_and_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = File::open(dir.path()).unwrap();
+        let owner_uid = unsafe { libc::geteuid() };
+        let admission_path = dir.path().join("admission.json");
+        std::fs::write(&admission_path, valid_admission()).unwrap();
+        std::fs::set_permissions(&admission_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_protected_beneath(&root, Path::new("admission.json"), owner_uid).unwrap(),
+            valid_admission()
+        );
+        assert!(read_protected_beneath(&root, Path::new("../admission.json"), owner_uid).is_err());
+        assert!(read_protected_beneath(&root, Path::new("/admission.json"), owner_uid).is_err());
+        symlink(&admission_path, dir.path().join("link.json")).unwrap();
+        assert!(read_protected_beneath(&root, Path::new("link.json"), owner_uid).is_err());
+        std::fs::set_permissions(&admission_path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert!(read_protected_beneath(&root, Path::new("admission.json"), owner_uid).is_err());
+        std::fs::set_permissions(&admission_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::write(subdir.join("admission.json"), valid_admission()).unwrap();
+        std::fs::set_permissions(
+            subdir.join("admission.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(
+            read_protected_beneath(&root, Path::new("subdir/admission.json"), owner_uid).is_err()
+        );
+        assert!(load_protected_admission_bytes(&admission_path).is_err());
     }
 }
