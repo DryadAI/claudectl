@@ -312,6 +312,20 @@ fn prepared_task(conn: &Connection, task: &TaskRow) -> Result<Option<PreparedNod
         .get(node_id)
         .ok_or("graph snapshot missing node")?
         .clone();
+    if prepared.node.kind == NodeKind::Agent {
+        let canonical = snapshot
+            .compiled
+            .spec
+            .nodes
+            .iter()
+            .find(|node| &node.id == node_id)
+            .ok_or("graph snapshot missing compiled agent node")?;
+        if serde_json::to_value(canonical).map_err(|e| e.to_string())?
+            != serde_json::to_value(&prepared.node).map_err(|e| e.to_string())?
+        {
+            return Err("prepared agent differs from compiled graph snapshot".into());
+        }
+    }
     if task.cwd != prepared.cwd {
         return Err("task cwd differs from stored graph".into());
     }

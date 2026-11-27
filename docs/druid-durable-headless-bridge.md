@@ -15,7 +15,9 @@ protected policy is enabled by this change.
 - `coord::supervisor::tick` emits a distinct, currently inert headless action
   for a stored headless agent snapshot. `coord::actuator::apply` rejects it;
   session actions still reject non-legacy graph providers. An unknown provider
-  fails closed instead of falling into `Spawn` or `Retry`.
+  fails closed instead of falling into `Spawn` or `Retry`. For agent tasks,
+  the prepared node must equal the compiled node in the stored snapshot;
+  a mismatched routing record fails closed.
 - `graph::mixed::claim_at` refuses agent nodes. Its `finish` transitions a
   passing deterministic provider result directly to `Done`. Calling that
   executor for a headless agent would incorrectly equate model completion

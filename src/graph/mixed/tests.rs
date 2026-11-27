@@ -157,18 +157,28 @@ fn supervisor_routes_snapshot_headless_agent_to_inert_lane() {
     {
         *provider = Some(headless.clone());
     }
+    let save = |conn: &Connection, saved: &Snapshot| {
+        let json = serde_json::to_string(saved).unwrap();
+        let digest = format!("{:x}", sha2::Sha256::digest(json.as_bytes()));
+        conn.execute(
+            "UPDATE graph_snapshots SET snapshot_json=?1, digest=?2 WHERE run_id=?3",
+            rusqlite::params![json, digest, submitted.graph_run_id],
+        )
+        .unwrap();
+    };
+    save(&conn, &saved);
+    assert!(
+        Supervisor::with_defaults()
+            .tick(&conn, &Quiet)
+            .unwrap_err()
+            .contains("prepared agent differs")
+    );
     if let Some(ExecutorSpec::Provider { provider, .. }) =
         &mut saved.nodes.get_mut("candidate").unwrap().node.executor
     {
         *provider = Some(headless);
     }
-    let json = serde_json::to_string(&saved).unwrap();
-    let digest = format!("{:x}", sha2::Sha256::digest(json.as_bytes()));
-    conn.execute(
-        "UPDATE graph_snapshots SET snapshot_json=?1, digest=?2 WHERE run_id=?3",
-        rusqlite::params![json, digest, submitted.graph_run_id],
-    )
-    .unwrap();
+    save(&conn, &saved);
     let task = &submitted.task_ids["candidate"];
     assert_eq!(
         tick(&conn),
