@@ -484,6 +484,27 @@ fn provider_error_retries_to_budget_but_never_reports_success() {
 }
 
 #[test]
+fn durable_submission_keeps_headless_provider_inactive() {
+    let dir = tempfile::tempdir().unwrap();
+    let compiled = graph(
+        vec![json!({
+            "id":"candidate", "kind":"agent", "requires":["agent.execute"],
+            "workspace":{"mode":"worktree"},
+            "authority":{"filesystem_read":["**"],"filesystem_write":["**"]},
+            "executor":{"kind":"provider","capability":"agent.execute",
+                "provider":"claude_code_headless",
+                "request":{"cwd":dir.path(),"prompt":"synthetic retry"}},
+            "retry":{"max_attempts":2}
+        })],
+        &[],
+    );
+    let mut conn = store::open_memory();
+    let error = durable::submit_with_options(&mut conn, &compiled, true).unwrap_err();
+    assert!(error.contains("unsupported provider 'claude_code_headless'"));
+    assert!(tasks::list_tasks(&conn, None).unwrap().is_empty());
+}
+
+#[test]
 fn unsupported_typed_transport_and_subgraphs_are_rejected() {
     let mut conn = store::open_memory();
     let mut g = graph(vec![provider("read"), gate()], &[("read", "approve")]);
