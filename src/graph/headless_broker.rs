@@ -23,6 +23,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use super::standing_policy::{self, PolicyPermit, StandingPolicy};
+
 const MAX_FRAME_BYTES: usize = 512;
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_ADMISSION_BYTES: u64 = 4096;
@@ -104,7 +106,12 @@ fn require_owner(file: &File, owner_uid: u32, directory: bool) -> Result<(), Str
 /// regular file must additionally be private. openat(O_NOFOLLOW) and FD-based
 /// reads prevent a caller-controlled symlink or path swap from changing the
 /// inode after verification. The production wrapper anchors at `/` and UID 0.
-fn read_protected_beneath(root: &File, relative: &Path, owner_uid: u32) -> Result<Vec<u8>, String> {
+fn read_protected_beneath(
+    root: &File,
+    relative: &Path,
+    owner_uid: u32,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
     if relative.is_absolute() {
         return Err("protected admission path must be relative to trusted root".into());
     }
@@ -128,10 +135,10 @@ fn read_protected_beneath(root: &File, relative: &Path, owner_uid: u32) -> Resul
     require_owner(&file, owner_uid, false)?;
     let mut bytes = Vec::new();
     (&mut file)
-        .take(MAX_ADMISSION_BYTES + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "protected admission read failed")?;
-    if bytes.is_empty() || bytes.len() as u64 > MAX_ADMISSION_BYTES {
+    if bytes.is_empty() || bytes.len() as u64 > max_bytes {
         return Err("protected admission size is invalid".into());
     }
     Ok(bytes)
@@ -141,11 +148,48 @@ fn read_protected_beneath(root: &File, relative: &Path, owner_uid: u32) -> Resul
 /// still validate exact contents, revocation, current policy, task state and
 /// ledger claim before any effect. No production caller exists yet.
 pub(crate) fn load_protected_admission_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    load_protected_root_bytes(path, MAX_ADMISSION_BYTES)
+}
+
+/// Read bounded root-owned authority without following any symlink. Its
+/// contents still require independent schema, policy and revocation checks.
+pub(crate) fn load_protected_root_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    if max_bytes == 0 || max_bytes > 65_536 {
+        return Err("protected authority size ceiling is invalid".into());
+    }
     let relative = path
         .strip_prefix("/")
         .map_err(|_| "protected admission path must be absolute")?;
     let root = File::open("/").map_err(|_| "protected root unavailable")?;
-    read_protected_beneath(&root, relative, 0)
+    read_protected_beneath(&root, relative, 0, max_bytes)
+}
+
+/// Root-only policy/revocation authorization for the future broker. Both
+/// files are opened through the same no-follow, root-owned FD walk before the
+/// existing standing-policy validator examines their contents. This is still
+/// not a worker permit: exact admission, task state, revocation, ledger and
+/// host checks remain necessary. No active caller exists yet.
+pub(crate) fn authorize_protected_root(
+    policy_path: &Path,
+    revocations_path: &Path,
+    now_unix_ms: u128,
+    task_id: &str,
+    repository_remote: &str,
+    operation: &str,
+) -> Result<(StandingPolicy, PolicyPermit), String> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("protected broker policy requires root".into());
+    }
+    let policy = load_protected_root_bytes(policy_path, 65_536)?;
+    let revocations = load_protected_root_bytes(revocations_path, 65_536)?;
+    standing_policy::authorize_contents(
+        &policy,
+        &revocations,
+        now_unix_ms,
+        task_id,
+        repository_remote,
+        operation,
+    )
 }
 
 /// Validate the *contents* of a protected admission against the requested
@@ -431,15 +475,54 @@ mod tests {
         std::fs::write(&admission_path, valid_admission()).unwrap();
         std::fs::set_permissions(&admission_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            read_protected_beneath(&root, Path::new("admission.json"), owner_uid).unwrap(),
+            read_protected_beneath(
+                &root,
+                Path::new("admission.json"),
+                owner_uid,
+                MAX_ADMISSION_BYTES
+            )
+            .unwrap(),
             valid_admission()
         );
-        assert!(read_protected_beneath(&root, Path::new("../admission.json"), owner_uid).is_err());
-        assert!(read_protected_beneath(&root, Path::new("/admission.json"), owner_uid).is_err());
+        assert!(read_protected_beneath(&root, Path::new("admission.json"), owner_uid, 2).is_err());
+        assert!(
+            read_protected_beneath(
+                &root,
+                Path::new("../admission.json"),
+                owner_uid,
+                MAX_ADMISSION_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            read_protected_beneath(
+                &root,
+                Path::new("/admission.json"),
+                owner_uid,
+                MAX_ADMISSION_BYTES
+            )
+            .is_err()
+        );
         symlink(&admission_path, dir.path().join("link.json")).unwrap();
-        assert!(read_protected_beneath(&root, Path::new("link.json"), owner_uid).is_err());
+        assert!(
+            read_protected_beneath(
+                &root,
+                Path::new("link.json"),
+                owner_uid,
+                MAX_ADMISSION_BYTES
+            )
+            .is_err()
+        );
         std::fs::set_permissions(&admission_path, std::fs::Permissions::from_mode(0o660)).unwrap();
-        assert!(read_protected_beneath(&root, Path::new("admission.json"), owner_uid).is_err());
+        assert!(
+            read_protected_beneath(
+                &root,
+                Path::new("admission.json"),
+                owner_uid,
+                MAX_ADMISSION_BYTES
+            )
+            .is_err()
+        );
         std::fs::set_permissions(&admission_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let subdir = dir.path().join("subdir");
         std::fs::create_dir(&subdir).unwrap();
@@ -451,7 +534,13 @@ mod tests {
         )
         .unwrap();
         assert!(
-            read_protected_beneath(&root, Path::new("subdir/admission.json"), owner_uid).is_err()
+            read_protected_beneath(
+                &root,
+                Path::new("subdir/admission.json"),
+                owner_uid,
+                MAX_ADMISSION_BYTES
+            )
+            .is_err()
         );
         assert!(load_protected_admission_bytes(&admission_path).is_err());
     }

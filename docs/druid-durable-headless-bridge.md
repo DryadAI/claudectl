@@ -26,8 +26,10 @@ transient unit, or protected policy is enabled by this change.
 - The non-durable `HeadlessProvider` transport produces a derived completion
   hash, not proof that candidate code or artifacts meet specifications.
 - Coordination schema v8 records a `graph_headless_claims` row against the
-  exact attempt and prior task transition. The unwired `claim_headless` entry
-  point requires a root supervisor, protected active policy, exact snapshot
+  exact attempt and prior task transition. The production `claim_headless`
+  entry point is now explicitly inactive until a protected coordinator ledger
+  exists; a private synthetic-test path still exercises the atomic claim.
+  That path checks protected active policy, exact snapshot
   digest, canonical compiled graph, satisfied dependencies, isolated recorded
   worktree, repository grant, deterministic verifier declaration, and both
   graph and policy retry ceilings. The task's projected prompt, role,

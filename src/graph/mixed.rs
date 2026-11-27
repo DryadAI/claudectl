@@ -385,33 +385,27 @@ pub(crate) struct HeadlessClaim {
     pub worktree: PathBuf,
 }
 
-/// Production entry point: only a root supervisor may read protected policy
-/// and claim an attempt. This is not wired to the actuator or CLI yet.
+/// Production entry point remains closed: a root process must not be handed
+/// an arbitrary SQLite connection into the operator-owned coord DB. The
+/// transaction below is exercised only by synthetic tests until the protected
+/// coordinator DB and root-broker path are independently reviewed.
 #[allow(dead_code)]
 pub(crate) fn claim_headless(
-    conn: &mut Connection,
-    task_id: &str,
-    expected_attempt: u32,
-    expected_snapshot_digest: &str,
-    policy_path: &Path,
-    revocations_path: &Path,
-    worktree_root: &Path,
+    _conn: &mut Connection,
+    _task_id: &str,
+    _expected_attempt: u32,
+    _expected_snapshot_digest: &str,
+    _policy_path: &Path,
+    _revocations_path: &Path,
+    _worktree_root: &Path,
 ) -> Result<Option<HeadlessClaim>, String> {
     if unsafe { libc::geteuid() } != 0 {
         return Err("headless claim requires a root supervisor".into());
     }
-    claim_headless_at(
-        conn,
-        task_id,
-        expected_attempt,
-        expected_snapshot_digest,
-        policy_path,
-        revocations_path,
-        worktree_root,
-        0,
-    )
+    Err("headless claim requires a protected coordination ledger; broker is inactive".into())
 }
 
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn claim_headless_at(
     conn: &mut Connection,
