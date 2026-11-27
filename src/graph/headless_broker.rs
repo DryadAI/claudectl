@@ -31,10 +31,66 @@ pub(crate) struct BrokerIntent {
     snapshot_digest: String,
 }
 
+/// Exact human-approved admission data for one graph task. This is only a
+/// parsed record: a future root service must load it through a protected,
+/// race-resistant owner/mode-checked path and separately check revocation.
+/// Neither a client-supplied copy nor this parser grants authority.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProtectedAdmission {
+    version: u8,
+    task_id: String,
+    snapshot_digest: String,
+    policy_sha256: String,
+    repository_remote: String,
+    expires_at_unix_ms: u128,
+    max_attempts: u32,
+}
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum BrokerAction {
     ClaimAndLaunch,
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// Validate the *contents* of a protected admission against the requested
+/// task and the independently accepted policy. Does not read the file, check
+/// its owner, inspect the coordination DB, or claim/launch an attempt.
+pub(crate) fn validate_protected_admission(
+    bytes: &[u8],
+    intent: &BrokerIntent,
+    policy_sha256: &str,
+    repository_remote: &str,
+    now_unix_ms: u128,
+) -> Result<ProtectedAdmission, String> {
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return Err("protected admission size is invalid".into());
+    }
+    let admission: ProtectedAdmission =
+        serde_json::from_slice(bytes).map_err(|_| "invalid protected admission")?;
+    if admission.version != PROTOCOL_VERSION
+        || admission.task_id != intent.task_id
+        || admission.snapshot_digest != intent.snapshot_digest
+        || !is_lower_sha256(&admission.policy_sha256)
+        || !is_lower_sha256(policy_sha256)
+        || admission.policy_sha256 != policy_sha256
+        || admission.repository_remote != repository_remote
+        || admission.repository_remote.is_empty()
+        || now_unix_ms >= admission.expires_at_unix_ms
+        || admission.max_attempts == 0
+        || admission.max_attempts > 6
+        || intent.expected_attempt > admission.max_attempts
+    {
+        return Err("protected admission does not authorize this exact intent".into());
+    }
+    Ok(admission)
 }
 
 /// Read peer identity from the kernel, never from request JSON or an
@@ -89,11 +145,7 @@ pub(crate) fn validate_intent(
             .task_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        || request.snapshot_digest.len() != 64
-        || !request
-            .snapshot_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !is_lower_sha256(&request.snapshot_digest)
     {
         return Err("local broker request fields are invalid".into());
     }
@@ -147,6 +199,20 @@ mod tests {
             "task_id": "task_123_456_0",
             "expected_attempt": 1,
             "snapshot_digest": "a".repeat(64),
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn valid_admission() -> Vec<u8> {
+        serde_json::json!({
+            "version": 1,
+            "task_id": "task_123_456_0",
+            "snapshot_digest": "a".repeat(64),
+            "policy_sha256": "b".repeat(64),
+            "repository_remote": "https://github.com/DryadAI/claudectl",
+            "expires_at_unix_ms": 100,
+            "max_attempts": 2,
         })
         .to_string()
         .into_bytes()
@@ -214,5 +280,56 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    #[test]
+    fn admission_requires_exact_task_snapshot_policy_repository_and_attempt() {
+        let (_client, server) = UnixStream::pair().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let intent = validate_intent(&server, &valid(), uid).unwrap();
+        let policy = "b".repeat(64);
+        let repo = "https://github.com/DryadAI/claudectl";
+        assert!(
+            validate_protected_admission(&valid_admission(), &intent, &policy, repo, 99).is_ok()
+        );
+        assert!(
+            validate_protected_admission(&valid_admission(), &intent, &policy, repo, 100).is_err()
+        );
+        assert!(
+            validate_protected_admission(&valid_admission(), &intent, &"c".repeat(64), repo, 99)
+                .is_err()
+        );
+        assert!(
+            validate_protected_admission(&valid_admission(), &intent, &policy, "other", 99)
+                .is_err()
+        );
+        for (field, value) in [
+            ("task_id", serde_json::json!("task_other")),
+            ("snapshot_digest", serde_json::json!("c".repeat(64))),
+            ("policy_sha256", serde_json::json!("B".repeat(64))),
+            ("max_attempts", serde_json::json!(0)),
+            ("max_attempts", serde_json::json!(7)),
+            ("version", serde_json::json!(2)),
+            ("approval", serde_json::json!(true)),
+        ] {
+            let mut forged: serde_json::Value = serde_json::from_slice(&valid_admission()).unwrap();
+            forged[field] = value;
+            assert!(
+                validate_protected_admission(
+                    forged.to_string().as_bytes(),
+                    &intent,
+                    &policy,
+                    repo,
+                    99
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
+        let mut intent2 = intent;
+        intent2.expected_attempt = 3;
+        assert!(
+            validate_protected_admission(&valid_admission(), &intent2, &policy, repo, 99).is_err()
+        );
     }
 }

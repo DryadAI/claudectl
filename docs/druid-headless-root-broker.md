@@ -30,6 +30,15 @@ supervisor UID in protected host configuration and use a root-owned socket.
 The task ID, attempt, and digest are lookup keys, **not authority**. The
 `dispatch_inert` endpoint always refuses execution.
 
+An additional, still-unwired parser checks an exact protected admission
+record against the request, independently accepted policy SHA-256, repository
+remote, expiry and maximum attempt. That parser does **not** prove that the
+record came from an owner-approved path; a JSON copy supplied by the caller
+has no authority. A future broker must load, authenticate and revoke the
+protected admission itself before using its contents. A protected admission
+is narrower than a standing policy: the policy authorizes a class of bounded
+development operations, while admission binds one task and graph snapshot.
+
 ## Required design gate before wiring
 
 The current coordination DB is opened through `coord::store::open()`, whose
@@ -39,9 +48,15 @@ user-controlled path as root. Before any connection to `claim_headless`:
 
 1. Choose a protected ledger ownership/location and a migration strategy that
    preserves the existing supervisor's atomic transitions. Review SQLite DB,
-   WAL, SHM, parent-directory and symlink ownership. A root-owned ledger with
-   a narrowly mediated user-facing API is the preferred direction; this is a
-   proposal, not an implemented migration.
+   WAL, SHM, parent-directory and symlink ownership. The recommended design
+   is a root-owned parent directory containing a DB writable only by a
+   dedicated, non-worker coordinator identity. The operator CLI would use a
+   narrow local API instead of writing SQLite directly. The existing
+   supervisor logic remains the **one scheduler**, relocated to that trusted
+   coordinator; a separate root broker has no tick loop. This is a proposal,
+   not an implemented service or migration. Directly giving root the current
+   operator-owned DB, merely changing its filename, or making a root-owned DB
+   writable by the operator would not establish a protected boundary.
 2. Pin broker policy/revocation files, worktree root, socket path, peer UID,
    unit template and resource bounds outside graph JSON and outside any
    user-writable tree. Root independently reloads/checks the active policy,
@@ -57,3 +72,28 @@ user-controlled path as root. Before any connection to `claim_headless`:
 Only after this review may a separately approved installation add a root-owned
 socket/service and activate a protected headless lane. A source test or a PR
 does not establish host readiness, reboot persistence, or live worker proof.
+
+## Proposed migration sequence (not executed)
+
+1. Inventory the actual Precision coordinator processes, DB path, ownership,
+   schema version and any active writers. Back up the SQLite database with its
+   own backup API while writers are quiesced; do not use a live file copy of
+   WAL-mode state as a migration proof.
+2. Create a new protected parent, coordinator identity and root broker identity
+   boundary. Deny the worker and ordinary operator direct DB access. Reject
+   symlinks, path traversal, world/group-writable ancestors and DB/WAL/SHM
+   state, and prove ownership before every privileged open. A path preflight
+   alone is insufficient if the file can be swapped before SQLite opens it.
+3. Migrate the exact schema in a disposable clone. Verify row counts, foreign
+   keys, graph snapshot digests, task transitions, headless claim uniqueness
+   and reopen behavior. Stop on any discrepancy; retain the old DB as a
+   recoverable rollback artifact rather than deleting it.
+4. Put the existing supervisor scheduler behind the coordinator service and
+   make the CLI a client. First prove legacy task behavior unchanged; only
+   then wire the broker's explicit headless intent. The broker must compare
+   the protected admission with stored graph/task/attempt and current policy
+   before claiming, and must treat claim-without-unit as uncertain.
+5. Independently prove one attempt, verifier transitions, cancel/timeout,
+   reboot reconciliation and denial of bypass from an unprivileged user and
+   `druid-worker` on a disposable host. Production cutover and activation
+   require separate owner approval and a documented rollback.
