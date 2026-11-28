@@ -1,8 +1,9 @@
 # DRUID protected coordinator cutover — review contract
 
 Status: **proposed design; no service, protected ledger, socket, migration or
-worker activation exists in this change**. This document inventories the
-source at claudectl `2850a32` and refines the gate in
+worker activation exists in this change**. This document started from source
+`2850a32`; the direct-caller inventory below was refreshed at claudectl
+`3c1f5cd` and refines the gate in
 `druid-headless-root-broker.md`. It is not a host configuration or permit.
 
 ## Why this is a full coordinator migration
@@ -14,14 +15,27 @@ readers able to bypass a protected authority boundary:
 | Source | Current direct-ledger role | Proposed client boundary |
 | --- | --- | --- |
 | `coord/supervisor_cli.rs`, `coord/cli.rs` | task/coord commands, status, drain and cancellation | typed operator requests; no SQL or arbitrary task mutation |
+| `runtime/actions.rs`, `runtime/coord.rs`, `runtime/orchestrator.rs` | direct cancel/retry/approve writes; TUI/runtime views; interrupt delivery and lease expiry | split owner decisions from read projections and scheduled internal effects; preserve existing supervisor authority |
+| `commands.rs` | periodic supervisor tick/actuation, pruning and context-rot interrupts | relocate this *existing* tick into the sole coordinator; define bounded internal effects, never a second scheduler |
 | `graph/durable.rs`, `graph/mixed.rs`, `graph/mod.rs` | durable submission/status, approval and snapshot inspection | submission, status and owner-decision requests bound to exact graph digest |
 | `graph/master.rs` | read-only run status | typed read-only status response |
-| `bus/mcp.rs`, `bus/cli.rs` | bus and coordinator state through direct open | separate bus DB stays separate; coordinator operations use typed requests |
+| `bus/mcp.rs` | some handlers open the coordinator DB directly; other calls open the separate bus DB | inventory each MCP handler and require an operation-specific peer policy; do not migrate bus storage by accident |
+| `bus/cli.rs` | inspected direct `store::open()` calls use the bus store | keep bus DB separate; recheck if call sites change |
+| `ingest.rs` | hook payload append into the coordinator DB | preserve bounded best-effort hook ingest and an authenticated append operation; do not turn an arbitrary payload into authority |
+| `init/mod.rs`, `doctor.rs` | coordinator schema migration and schema/health checks | protected, offline migration path and a non-mutating status check; no operator-ledger migration as root |
 | `coord/injection.rs`, `coord/exporter.rs`, `coord/pr.rs`, `coord/promotion.rs` | context, metrics, PR summaries and promotion | least-privilege read or named effect requests, as appropriate |
 | `coord/supervisor.rs` | scheduler logic receives a connection from callers | relocate the *existing* scheduler into the sole coordinator process |
 
-This is a source inventory, not a claim that each caller is safe to expose
-unchanged. Each operation needs a caller identity, authorization rule, input
+This is a source-level inventory, **not** a complete runtime/process inventory.
+Reproduce the direct-open search on the target revision with
+`rg -n 'coord::store::open|store::open\(|store::open_read_only\(' src --glob '*.rs'`,
+then resolve each local `store` import before classifying it: the same spelling
+can mean the independent bus store. Also trace functions that receive an
+already-open coordinator connection (such as the supervisor and actuator).
+Any new direct-ledger caller blocks the cutover until classified and migrated.
+
+This is not a claim that each caller is safe to expose unchanged. Each
+operation needs a caller identity, authorization rule, input
 limit, response redaction rule, idempotency key and denial test before it
 crosses a socket. A generic SQL, file-path or shell request is forbidden.
 
@@ -57,7 +71,8 @@ crosses a socket. A generic SQL, file-path or shell request is forbidden.
    worker cannot directly open DB/WAL/SHM. Check symlinks, parent ownership,
    sidecar modes and SQLite path-swap behavior. A path preflight alone is not
    sufficient.
-3. Migrate every direct-ledger caller above, including MCP and metrics.
+3. Migrate every direct-ledger caller above, including runtime hooks, TUI,
+   initialization, doctor, MCP and metrics.
    Compare legacy behavior for normal tasks, approvals, retries, interrupts,
    cancel and restart. Prove denied/unknown/oversized requests have no side
    effect; prove a compromised client cannot forge an owner decision.
