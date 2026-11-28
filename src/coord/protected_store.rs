@@ -44,6 +44,14 @@ fn valid_digest(digest: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn valid_graph_id(id: &str) -> bool {
+    id.starts_with("graph_")
+        && (8..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 impl ProtectedReadStore {
     /// Only the two staged status projections are available. No task prompt,
     /// policy, worktree, evidence payload or admission is selected.
@@ -62,14 +70,17 @@ impl ProtectedReadStore {
                     .map_err(|_| "protected task status query failed")?;
                 match row {
                     None => Ok(ReadResponse::NotFound),
-                    Some((state, graph_run_id)) if TaskState::parse(&state).is_some() => {
+                    Some((state, graph_run_id))
+                        if TaskState::parse(&state).is_some()
+                            && graph_run_id.as_deref().is_none_or(valid_graph_id) =>
+                    {
                         Ok(ReadResponse::TaskState {
                             id: request.id.clone(),
                             state,
                             graph_run_id,
                         })
                     }
-                    Some(_) => Err("protected task state is unknown".into()),
+                    Some(_) => Err("protected task state or graph ID is invalid".into()),
                 }
             }
             ReadOperation::GraphState => {
@@ -421,6 +432,31 @@ mod tests {
             id: "graph_123".into(),
         };
         assert!(store.query(&graph).is_err());
+    }
+
+    #[test]
+    fn refuses_unbounded_graph_id_in_task_projection() {
+        let (dir, root, uid) = fixture();
+        let path = dir.path().join("protected/coord/coord.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute("UPDATE tasks SET graph_run_id = ?1", ["x".repeat(600)])
+            .unwrap();
+        drop(writer);
+        let store = open_checked(
+            &path,
+            &root,
+            Path::new("protected/coord/coord.db"),
+            uid,
+            uid,
+        )
+        .unwrap();
+        let task = ReadRequest {
+            version: 1,
+            operation: ReadOperation::TaskState,
+            id: "task_123".into(),
+        };
+        assert!(store.query(&task).is_err());
     }
 
     #[test]

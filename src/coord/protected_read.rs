@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const VERSION: u8 = 1;
 const MAX_REQUEST_BYTES: usize = 256;
+const MAX_RESPONSE_BYTES: usize = 512;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -130,6 +131,19 @@ pub(crate) fn dispatch_inert(_request: &ReadRequest) -> Result<ReadResponse, Str
     Err("protected coordinator read service is not activated".into())
 }
 
+/// Encode one bounded response frame. A future service must not write a
+/// response until the peer and operation have been authorized independently.
+pub(crate) fn frame_response(response: &ReadResponse) -> Result<Vec<u8>, String> {
+    let body = serde_json::to_vec(response).map_err(|_| "coordinator response is invalid")?;
+    if body.is_empty() || body.len() > MAX_RESPONSE_BYTES {
+        return Err("coordinator response size is invalid".into());
+    }
+    let mut frame = Vec::with_capacity(2 + body.len());
+    frame.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +218,25 @@ mod tests {
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["kind"], "task_state");
         assert_eq!(json.as_object().unwrap().len(), 4);
+        let response = ReadResponse::TaskState {
+            id: "task_123".into(),
+            state: "PENDING".into(),
+            graph_run_id: None,
+        };
+        let frame = frame_response(&response).unwrap();
+        assert_eq!(
+            usize::from(u16::from_be_bytes([frame[0], frame[1]])),
+            frame.len() - 2
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&frame[2..]).unwrap()["kind"],
+            "task_state"
+        );
+        let oversize = ReadResponse::TaskState {
+            id: "task_123".into(),
+            state: "PENDING".into(),
+            graph_run_id: Some("x".repeat(MAX_RESPONSE_BYTES)),
+        };
+        assert!(frame_response(&oversize).is_err());
     }
 }

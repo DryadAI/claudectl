@@ -22,6 +22,11 @@ select prompts, policies, worktree paths or evidence payloads. A request ID
 is still just a lookup key. The module has no listener or production caller;
 the staged protocol dispatcher remains inert.
 
+The task projection rejects malformed or oversized graph-run IDs. Responses
+have an explicit two-byte length prefix and 512-byte JSON limit; this
+encoding is source-only and writes to no socket. A future service must
+authorize each peer operation before using it.
+
 This is not a complete race-free host guarantee: a process sharing the
 coordinator UID could swap a file between validation and SQLite open. The
 identity must be dedicated to one service with no untrusted same-UID process.
