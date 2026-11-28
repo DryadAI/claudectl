@@ -62,10 +62,7 @@ impl ExploreFilter<'_> {
                 return false;
             }
         }
-        if eff_conf < self.min_confidence {
-            return false;
-        }
-        true
+        eff_conf >= self.min_confidence
     }
 }
 
@@ -243,10 +240,7 @@ pub fn welcome_snapshot<'a>(store: &'a HiveStore, trust: &TrustStore) -> Vec<&'a
                 .get(&u.source_peer)
                 .map(|t| t.tier())
                 .unwrap_or(TrustTier::Suggested);
-            if tier_rank(tier) < tier_rank(TrustTier::Suggested) {
-                return false;
-            }
-            true
+            tier_rank(tier) >= tier_rank(TrustTier::Suggested)
         })
         .filter_map(|u| {
             let eff = effective_confidence(u, now);
