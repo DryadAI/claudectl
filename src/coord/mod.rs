@@ -14,6 +14,8 @@ pub mod pr;
 pub mod promotion;
 #[cfg(target_os = "linux")]
 pub(crate) mod protected_read;
+#[cfg(target_os = "linux")]
+pub(crate) mod protected_store;
 pub mod resume;
 pub mod session_policy;
 pub mod store;

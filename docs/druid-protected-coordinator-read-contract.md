@@ -1,16 +1,18 @@
 # Proposed protected coordinator read contract
 
-Status: **source-only protocol; no socket, service, CLI client, SQLite open or
-running endpoint**. This is the first narrow slice of the whole-ledger cutover
+Status: **source-only protocol; no socket, service, CLI client or running
+endpoint**. This is the first narrow slice of the whole-ledger cutover
 outlined in `druid-protected-coordinator-cutover.md`, not an activation step.
 
 `coord::protected_read` accepts one length-prefixed JSON request from a Linux
 Unix peer. The two-byte big-endian length is limited to 256 bytes. The parser
-checks `SO_PEERCRED` against a caller-supplied UID **before reading**; a real
-service must pin that UID in protected host configuration, not graph JSON,
-an environment variable, or operator-controlled files. It sets a two-second
-read timeout and rejects unknown fields, versions, operations and malformed
-IDs. Example request (illustrative only; no socket exists):
+checks `SO_PEERCRED` against a staged per-operation peer policy **before
+reading**; a real service must construct that policy from protected host
+configuration, not graph JSON, an environment variable, or operator-controlled
+files. Root and the coordinator UID cannot be read peers. After parsing, it
+checks that the same kernel peer is allowed for the named operation. It sets a
+two-second read timeout and rejects unknown fields, versions, operations and
+malformed IDs. Example request (illustrative only; no socket exists):
 
 ```json
 {"version":1,"operation":"task_state","id":"task_123_456"}
@@ -22,10 +24,20 @@ The response type allows only state and graph identity/digest fields, not
 prompts, policies, worktree paths, evidence payloads or credentials. The
 current dispatcher **always rejects**, so the response type is a design
 constraint rather than a claim that status can already be queried.
+The source-only response encoder adds a two-byte length prefix and rejects
+JSON bodies over 512 bytes. A staged one-request handler in
+`protected_store` can write one such frame to a caller-supplied, already
+connected Unix stream, then close it. It does not create a listener or make
+the inert production dispatcher active. Pipelined requests are unsupported.
 
-Before a service can use this protocol, it needs a protected ledger opener,
-exact per-operation peer authorization, a read-only projection implementation,
-bounded response framing, one-request-per-connection closure, resource limits
+`druid-protected-coordinator-store.md` describes a later source-only guarded
+opener and projection implementation. It does not make this wire dispatcher
+or a service active.
+
+Before a service can use this protocol, it needs a host-proven protected ledger
+opener and projection (the source-only versions are not host proof),
+reviewed and host-pinned per-operation peer identities,
+listener/accept-loop resource limits, host service lifecycle
 and tests against a disposable protected identity/storage layout. Writes and
 the existing supervisor scheduler require separate design and review. The
 root broker must not use this read contract to obtain a permit or open the
