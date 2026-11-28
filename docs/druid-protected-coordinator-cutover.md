@@ -44,8 +44,9 @@ crosses a socket. A generic SQL, file-path or shell request is forbidden.
 1. A root-owned, non-user-writable parent holds a private coordinator DB
    directory. A dedicated non-worker coordinator identity alone may write the
    DB, WAL and SHM. Neither the ordinary operator nor `druid-worker` gets
-   direct ledger access. The exact account, group, absolute paths and unit
-   hardening need host review; none is selected or installed here.
+   direct ledger access. The owner approved the identity/path *design* in
+   `druid-protected-coordinator-host-decision.md`; the socket ACL is a
+   candidate and unit hardening still needs host review. Nothing is installed.
 2. A local coordinator service authenticates each Unix peer from the kernel
    and authorizes a named operation. The operator CLI and existing bus/graph
    integrations become clients. The service owns the existing supervisor
@@ -84,11 +85,10 @@ crosses a socket. A generic SQL, file-path or shell request is forbidden.
    paid-API fallback on a disposable host. Only then seek separate owner
    authorization for production cutover and headless activation.
 
-Open design decision: exact protected identity/storage/Unix-socket ownership
-and the minimal allowed operation set. The recommended direction is a
-dedicated coordinator identity under a root-owned parent with a narrow local
-API, but these values require an explicit reviewed host design. No current
-source endpoint or SDK implements this contract.
+Open design decisions: exact Unix-socket ACL, service hardening, backup and
+rollback procedure, and the write/approval operation set. The identity/path
+direction is owner-approved but not installed. No current source endpoint or
+SDK implements this contract.
 
 The staged read-only request shape is in
 `druid-protected-coordinator-read-contract.md`. Its parser has no listener or ledger

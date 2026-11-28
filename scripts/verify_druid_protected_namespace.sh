@@ -38,7 +38,9 @@ if [[ ! -x "$test_binary" ]]; then
   printf 'BLOCKED: compiled Rust test binary unavailable\n' >&2
   exit 1
 fi
-if ! "$test_binary" --list | rg -q '^coord::protected_store::tests::disposable_namespace_probe: test$'; then
+# `rg -q` exits at the first match, which makes the producer fail with EPIPE
+# under pipefail when the Rust suite lists hundreds of tests.
+if ! "$test_binary" --list | rg '^coord::protected_store::tests::disposable_namespace_probe: test$' >/dev/null; then
   printf 'BLOCKED: disposable Rust proof test was not compiled\n' >&2
   exit 1
 fi

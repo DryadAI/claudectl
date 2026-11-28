@@ -28,7 +28,7 @@ No coordinator DB, snapshot, secret or running service was opened.
 | Read peer: task state | existing `katalyst` UID, resolved at service start from protected host configuration | one operator status reader; no write or approval authority |
 | Read peer: graph state | same `katalyst` UID initially | avoids another account until a distinct reader is justified |
 | Denied read peers | root, `druid-worker`, `druid-coordinator`, all other UIDs | source policy rejects root/coordinator; host config must exclude worker |
-| Local socket | root-managed `/run/druid-coordinator/read.sock`, exact mode/ownership to be designed with the service | do not give operator direct DB access; no listener exists yet |
+| Local socket | root-managed `/run/druid-coordinator/read.sock`; candidate root:`katalyst` 0660 under root:root 0755 directory | operator can connect without direct DB access; peer UID policy still rejects root, worker and coordinator |
 
 The static UID number must be allocated and verified **at installation time**;
 do not hardcode an unverified number in source or accept one from a graph,
@@ -41,9 +41,14 @@ launch, SQL, path, shell or generic graph mutation authority.
 ## Decision and proof gates
 
 1. Owner approved the proposed account, root-owned parent and operator-only
-   read-peer direction on 2026-11-28. The exact socket mode/group and service
-   hardening are still open. Account creation, permissions and systemd changes
-   are **not** covered by this source PR or that design approval.
+   read-peer direction on 2026-11-28. A candidate socket ACL is now specified
+   for review, not installed or owner-approved. On the checked Precision
+   snapshot, `katalyst` was the sole passwd user with primary GID 1000 and
+   `getent group katalyst` listed no supplementary members; recheck both at
+   installation. Root-owned parent and `SO_PEERCRED` are both required: socket
+   DAC alone cannot distinguish an allowed UID from a different user sharing
+   that group. Account creation, permissions and systemd changes are **not**
+   covered by this source PR or the earlier design approval.
 2. In a disposable host environment, create the selected layout and prove
    `open_read_only` accepts only the dedicated coordinator identity and the
    exact schema-v9 DB. Prove operator and worker cannot directly open
@@ -52,9 +57,22 @@ launch, SQL, path, shell or generic graph mutation authority.
    ancestor and path-swap denials. Synthetic unit fixtures do not satisfy
    this gate.
 3. Build a single protected coordinator service around the existing
-   supervisor scheduler. The read socket must authenticate kernel peers,
-   apply the operation-specific policy and close after one request. Test
-   timeouts, resource limits, crash/restart and denial side effects.
+   supervisor scheduler. Candidate socket-activation shape: systemd `.socket`
+   creates the root-owned parent with `DirectoryMode=0755` and the socket with
+   `SocketUser=root`, `SocketGroup=katalyst`, `SocketMode=0660`; the
+   `druid-coordinator` service receives the listening FD rather than opening
+   the path itself. Do not grant the coordinator service that operator group.
+   The source-only one-request helper authenticates kernel peers, applies
+   operation-specific policy, sets two-second read/write timeouts and closes
+   an accepted connection after one request. A real accept loop still needs
+   bounded concurrency, crash/restart and denial-side-effect tests. Candidate
+   service controls are `User=druid-coordinator`, `Group=druid-coordinator`,
+   no supplementary groups, `NoNewPrivileges=yes`, `ProtectSystem=strict`,
+   `ReadWritePaths=/var/lib/druid-coordinator/coord`, `ProtectHome=yes`,
+   `PrivateTmp=yes`, `RestrictAddressFamilies=AF_UNIX`,
+   `IPAddressDeny=any` and an empty capability bounding set. Verify each
+   control against the actual binary on a disposable host before selecting
+   a unit; none is installed here.
 4. Inventory and migrate **every** direct-ledger caller in the cutover
    contract, keeping the current operator ledger non-broker until complete.
    Capture and audit a private consistent backup and prove rollback before
@@ -63,8 +81,8 @@ launch, SQL, path, shell or generic graph mutation authority.
    headless broker/worker/model activation. A merged PR or passing unit test
    does not lift these gates.
 
-Open: exact Unix socket mode/group, host-managed service hardening, backup
-destination and rollback procedure. These require a service design and
+Open: owner review of the candidate Unix socket ACL, host-managed service
+hardening, backup destination and rollback procedure. These require a
 disposable-host proof before selection. Do not substitute a root process
 opening the operator-profile ledger.
 
@@ -93,7 +111,10 @@ fixtures, but **not** a complete actual-host or race proof.
 
 Still unproved: a hostile process sharing the coordinator UID could swap a
 path between validation and SQLite open; the dedicated account/service
-must exclude such processes or the opener must be strengthened. Actual
+must exclude such processes or the opener must be strengthened. The service
+identity itself is trusted code with ledger write authority under Unix DAC;
+the read-only SQLite flag does not make a compromised same-UID process
+read-only. Actual
 Precision account, path, socket, unit, reboot behavior, open-handle inventory,
 backup/rollback and every caller migration remain unverified. Production
 cutover, broker, worker and model activation still require separate review.

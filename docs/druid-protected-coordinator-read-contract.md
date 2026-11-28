@@ -25,7 +25,10 @@ prompts, policies, worktree paths, evidence payloads or credentials. The
 current dispatcher **always rejects**, so the response type is a design
 constraint rather than a claim that status can already be queried.
 The source-only response encoder adds a two-byte length prefix and rejects
-JSON bodies over 512 bytes; it writes to no socket.
+JSON bodies over 512 bytes. A staged one-request handler in
+`protected_store` can write one such frame to a caller-supplied, already
+connected Unix stream, then close it. It does not create a listener or make
+the inert production dispatcher active. Pipelined requests are unsupported.
 
 `druid-protected-coordinator-store.md` describes a later source-only guarded
 opener and projection implementation. It does not make this wire dispatcher
@@ -34,7 +37,7 @@ or a service active.
 Before a service can use this protocol, it needs a host-proven protected ledger
 opener and projection (the source-only versions are not host proof),
 reviewed and host-pinned per-operation peer identities,
-one-request-per-connection closure, resource limits
+listener/accept-loop resource limits, host service lifecycle
 and tests against a disposable protected identity/storage layout. Writes and
 the existing supervisor scheduler require separate design and review. The
 root broker must not use this read contract to obtain a permit or open the

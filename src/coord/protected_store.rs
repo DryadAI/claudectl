@@ -8,11 +8,13 @@
 
 use std::ffi::{OsStr, OsString, c_int};
 use std::fs::File;
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
+use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
@@ -30,8 +32,8 @@ pub(crate) struct ProtectedReadStore {
 
 /// Prepare one response from an already-connected peer and an already-opened
 /// protected store. This source-only helper does not write the frame, bind a
-/// socket, choose a host path or activate the inert dispatcher. A future
-/// service must independently review and implement connection lifecycle.
+/// socket, choose a host path or activate the inert dispatcher. The separate
+/// staged handler owns one already-accepted connection.
 pub(crate) fn prepare_staged_response(
     stream: &mut UnixStream,
     policy: &ReadPeerPolicy,
@@ -40,6 +42,24 @@ pub(crate) fn prepare_staged_response(
     let request = read_request(stream, policy)?;
     let response = store.query(&request)?;
     frame_response(&response)
+}
+
+/// Handle exactly one request on an already-accepted Unix connection. The
+/// owned stream is dropped on every return path, including denial and write
+/// failure. This does not create a listener or select a host identity/path.
+/// A future service must still bound the number of simultaneous connections.
+pub(crate) fn serve_one_staged_read(
+    mut stream: UnixStream,
+    policy: &ReadPeerPolicy,
+    store: &ProtectedReadStore,
+) -> Result<(), String> {
+    let frame = prepare_staged_response(&mut stream, policy, store)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| "coordinator write timeout unavailable")?;
+    stream
+        .write_all(&frame)
+        .map_err(|_| "coordinator response write failed".into())
 }
 
 fn valid_graph_state(state: &str) -> bool {
@@ -283,7 +303,7 @@ fn open_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     /// Invoked only by scripts/verify_druid_protected_namespace.sh inside an
@@ -383,6 +403,67 @@ mod tests {
         let (mut client, mut server) = UnixStream::pair().unwrap();
         client.write_all(bytes).unwrap();
         prepare_staged_response(&mut server, policy, store)
+    }
+
+    #[test]
+    fn staged_connection_writes_one_frame_then_closes() {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return;
+        }
+        let (dir, root, _) = fixture();
+        let path = dir.path().join("protected/coord/coord.db");
+        let store = open_checked(
+            &path,
+            &root,
+            Path::new("protected/coord/coord.db"),
+            uid,
+            uid,
+        )
+        .unwrap();
+        let policy = ReadPeerPolicy::new(uid, uid, uid + 1).unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(&framed_request("task_state", "task_123"))
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        serve_one_staged_read(server, &policy, &store).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let length = usize::from(u16::from_be_bytes([response[0], response[1]]));
+        assert_eq!(response.len(), length + 2);
+        let body: serde_json::Value = serde_json::from_slice(&response[2..]).unwrap();
+        assert_eq!(body["kind"], "task_state");
+    }
+
+    #[test]
+    fn staged_connection_denial_closes_without_response() {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return;
+        }
+        let (dir, root, _) = fixture();
+        let path = dir.path().join("protected/coord/coord.db");
+        let store = open_checked(
+            &path,
+            &root,
+            Path::new("protected/coord/coord.db"),
+            uid,
+            uid,
+        )
+        .unwrap();
+        let policy = ReadPeerPolicy::new(uid, uid + 1, uid + 2).unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(&framed_request("graph_state", "graph_123"))
+            .unwrap();
+        assert_eq!(
+            serve_one_staged_read(server, &policy, &store).unwrap_err(),
+            "coordinator peer is not authorized for operation"
+        );
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert!(response.is_empty());
     }
 
     #[test]
