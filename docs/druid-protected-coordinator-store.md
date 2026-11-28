@@ -24,13 +24,14 @@ the staged protocol dispatcher remains inert.
 
 The task projection rejects malformed or oversized graph-run IDs. Responses
 have an explicit two-byte length prefix and 512-byte JSON limit; this
-encoding is source-only and writes to no socket. A future service must
-authorize each peer operation before using it.
+encoding is source-only and writes to no socket. The staged parser now
+authorizes each peer operation against a policy, but no UIDs or service are
+configured.
 
 This is not a complete race-free host guarantee: a process sharing the
 coordinator UID could swap a file between validation and SQLite open. The
 identity must be dedicated to one service with no untrusted same-UID process.
-Actual parent, account, socket ownership, response framing, peer policy,
+Actual parent, account, socket ownership, host-pinned peer policy,
 complete caller migration, crash/restart, backup/rollback and independent
 disposable-host proof remain required before any cutover. Never point root at
 the existing operator-profile ledger as a shortcut.
