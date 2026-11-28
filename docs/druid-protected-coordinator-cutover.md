@@ -80,3 +80,6 @@ The staged read-only request shape is in
 access and cannot be treated as a working coordinator service.
 `druid-protected-coordinator-store.md` adds source-only guarded read access
 and redacted projections; it still has no production caller or host proof.
+`druid-protected-coordinator-host-decision.md` records a recommended
+Precision identity/path/peer matrix for separate owner review. It installs
+nothing and does not replace disposable-host proof.
