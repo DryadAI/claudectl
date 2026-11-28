@@ -43,3 +43,11 @@ Actual parent, account, socket ownership, host-pinned peer policy,
 complete caller migration, crash/restart, backup/rollback and independent
 disposable-host proof remain required before any cutover. Never point root at
 the existing operator-profile ledger as a shortcut.
+
+After owner approval of the host *design*, the disposable namespace harness in
+`scripts/verify_druid_protected_namespace.sh` exercised this opener under
+separate synthetic process UIDs and a tmpfs-backed `/var/lib` layout. It
+passed the listed positive/negative cases on 2026-11-28. This advances the
+source boundary beyond unit fixtures; it does not prove actual Precision
+installation, service/socket behavior or the documented same-UID path-swap
+race. The production dispatcher remains inert.

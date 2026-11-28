@@ -286,6 +286,86 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
+    /// Invoked only by scripts/verify_druid_protected_namespace.sh inside an
+    /// isolated user/mount/network namespace and disposable chroot. The
+    /// numeric identities below are *namespace-only*, never host selections.
+    #[test]
+    fn disposable_namespace_probe() {
+        let Some(mode) = std::env::var_os("DRUID_PROTECTED_PROOF_MODE") else {
+            return;
+        };
+        let path = Path::new("/var/lib/druid-coordinator/coord/coord.db");
+        const COORDINATOR_UID: u32 = 1001;
+        let uid = unsafe { libc::geteuid() };
+        match mode.to_str().unwrap() {
+            "seed" => {
+                assert_eq!(uid, COORDINATOR_UID);
+                let conn = store::open().unwrap();
+                let version: u32 = conn
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(version, store::EXPECTED_COORD_SCHEMA_VERSION);
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .unwrap();
+            }
+            "coordinator" => {
+                assert_eq!(uid, COORDINATOR_UID);
+                let protected = open_read_only(path, COORDINATOR_UID).unwrap();
+                for (operation, id) in [
+                    (ReadOperation::TaskState, "task_missing"),
+                    (ReadOperation::GraphState, "graph_missing"),
+                ] {
+                    let request = ReadRequest {
+                        version: 1,
+                        operation,
+                        id: id.into(),
+                    };
+                    assert_eq!(protected.query(&request).unwrap(), ReadResponse::NotFound);
+                }
+            }
+            "operator" | "worker" => {
+                assert!(matches!(uid, 1000 | 1002));
+                assert_eq!(
+                    File::open(path).unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+                for suffix in ["-wal", "-shm"] {
+                    let sidecar = path.with_file_name(format!("coord.db{suffix}"));
+                    assert_eq!(
+                        File::open(sidecar).unwrap_err().kind(),
+                        std::io::ErrorKind::PermissionDenied
+                    );
+                }
+                assert_eq!(
+                    std::fs::rename(path, path.with_extension("swapped"))
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+                assert!(open_read_only(path, COORDINATOR_UID).is_err());
+            }
+            "root" => {
+                assert_eq!(uid, 0);
+                // Namespace root can bypass DAC, but the guarded opener must
+                // still refuse it. This is not host-root isolation.
+                assert!(File::open(path).is_ok());
+                assert!(open_read_only(path, COORDINATOR_UID).is_err());
+            }
+            "reject" => {
+                assert_eq!(uid, COORDINATOR_UID);
+                assert!(open_read_only(path, COORDINATOR_UID).is_err());
+            }
+            "reject_schema" => {
+                assert_eq!(uid, COORDINATOR_UID);
+                assert_eq!(
+                    open_read_only(path, COORDINATOR_UID).err().as_deref(),
+                    Some("protected coordinator schema version is not exact")
+                );
+            }
+            other => panic!("unknown disposable proof mode: {other}"),
+        }
+    }
+
     fn framed_request(operation: &str, id: &str) -> Vec<u8> {
         let body = serde_json::json!({"version": 1, "operation": operation, "id": id})
             .to_string()

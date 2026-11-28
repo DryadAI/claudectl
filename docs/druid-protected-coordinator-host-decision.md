@@ -1,6 +1,7 @@
 # Protected coordinator host decision packet
 
-Status: **proposed, not approved or installed**. This packet narrows the
+Status: **owner approved the proposed design in conversation on 2026-11-28;
+not installed or activated**. This packet narrows the
 identity, path and peer choice required by the source-only protected read code.
 It does not authorize a live ledger migration, service, broker or worker.
 
@@ -16,7 +17,7 @@ proposed names and paths; they are
 **not** an inventory of every existing coordinator process or socket.
 No coordinator DB, snapshot, secret or running service was opened.
 
-## Recommended selection for separate owner review
+## Owner-approved design, subject to host proof
 
 | Boundary | Proposed value | Why |
 | --- | --- | --- |
@@ -39,9 +40,10 @@ launch, SQL, path, shell or generic graph mutation authority.
 
 ## Decision and proof gates
 
-1. Owner reviews the exact account, root-owned parent, read-peer matrix and
-   socket ownership. Account creation, permissions and systemd changes are
-   **not** covered by this source PR.
+1. Owner approved the proposed account, root-owned parent and operator-only
+   read-peer direction on 2026-11-28. The exact socket mode/group and service
+   hardening are still open. Account creation, permissions and systemd changes
+   are **not** covered by this source PR or that design approval.
 2. In a disposable host environment, create the selected layout and prove
    `open_read_only` accepts only the dedicated coordinator identity and the
    exact schema-v9 DB. Prove operator and worker cannot directly open
@@ -65,3 +67,33 @@ Open: exact Unix socket mode/group, host-managed service hardening, backup
 destination and rollback procedure. These require a service design and
 disposable-host proof before selection. Do not substitute a root process
 opening the operator-profile ledger.
+
+## Disposable namespace evidence (source-only)
+
+`bash scripts/verify_druid_protected_namespace.sh` creates a fresh tmpfs
+chroot inside new Linux user, mount and network namespaces. Namespace UID 0
+maps to the invoking unprivileged host user; UIDs 1000/1001/1002 map into
+that user's subordinate range. These are **synthetic roles**, not selected
+Precision account numbers. No host `/var/lib` path or operator ledger is
+mounted into the chroot. The Rust test binary and `/usr` are bind-mounted
+read-only; the tmpfs disappears when the namespace exits.
+
+On 2026-11-28 the script passed: the real schema migration created a fresh
+v9 ledger; SQLite integrity and version checks passed; only the synthetic
+coordinator UID could use the guarded opener and query missing task/graph
+state. Synthetic operator and worker UIDs got permission-denied on the DB,
+both sidecars and a rename attempt. Namespace root could read through DAC
+but the guarded opener rejected root. The opener rejected world-readable
+WAL, DB symlink/hardlink, writable root-owned ancestor, SHM symlink and
+schema v8; restored v9 reopened successfully. No fixture directory remained
+under the proof prefix. The full isolated-profile Rust suite passed
+947/963/6/78/16/8; format, diff and Clippy with the existing Hive allowance
+passed. This is independent process/UID evidence beyond the synthetic unit
+fixtures, but **not** a complete actual-host or race proof.
+
+Still unproved: a hostile process sharing the coordinator UID could swap a
+path between validation and SQLite open; the dedicated account/service
+must exclude such processes or the opener must be strengthened. Actual
+Precision account, path, socket, unit, reboot behavior, open-handle inventory,
+backup/rollback and every caller migration remain unverified. Production
+cutover, broker, worker and model activation still require separate review.
