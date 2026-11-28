@@ -11,17 +11,35 @@ use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
-use super::protected_read::{ReadOperation, ReadRequest, ReadResponse, validate_fields};
+use super::protected_read::{
+    ReadOperation, ReadPeerPolicy, ReadRequest, ReadResponse, frame_response, read_request,
+    validate_fields,
+};
 use super::{store, tasks::TaskState};
 
 /// The connection is private so a caller cannot supply an arbitrary
 /// operator-owned SQLite connection to the read projection.
 pub(crate) struct ProtectedReadStore {
     conn: Connection,
+}
+
+/// Prepare one response from an already-connected peer and an already-opened
+/// protected store. This source-only helper does not write the frame, bind a
+/// socket, choose a host path or activate the inert dispatcher. A future
+/// service must independently review and implement connection lifecycle.
+pub(crate) fn prepare_staged_response(
+    stream: &mut UnixStream,
+    policy: &ReadPeerPolicy,
+    store: &ProtectedReadStore,
+) -> Result<Vec<u8>, String> {
+    let request = read_request(stream, policy)?;
+    let response = store.query(&request)?;
+    frame_response(&response)
 }
 
 fn valid_graph_state(state: &str) -> bool {
@@ -265,7 +283,119 @@ fn open_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn framed_request(operation: &str, id: &str) -> Vec<u8> {
+        let body = serde_json::json!({"version": 1, "operation": operation, "id": id})
+            .to_string()
+            .into_bytes();
+        let mut frame = (body.len() as u16).to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    fn prepare(
+        store: &ProtectedReadStore,
+        policy: &ReadPeerPolicy,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client.write_all(bytes).unwrap();
+        prepare_staged_response(&mut server, policy, store)
+    }
+
+    #[test]
+    fn staged_response_authenticates_then_projects_only_status() {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return;
+        }
+        let (dir, root, _) = fixture();
+        let path = dir.path().join("protected/coord/coord.db");
+        let store = open_checked(
+            &path,
+            &root,
+            Path::new("protected/coord/coord.db"),
+            uid,
+            uid,
+        )
+        .unwrap();
+        let policy = ReadPeerPolicy::new(uid, uid, uid + 1).unwrap();
+        for (operation, id, kind) in [
+            ("task_state", "task_123", "task_state"),
+            ("graph_state", "graph_123", "graph_state"),
+            ("task_state", "task_missing", "not_found"),
+        ] {
+            let frame = prepare(&store, &policy, &framed_request(operation, id)).unwrap();
+            assert_eq!(
+                usize::from(u16::from_be_bytes([frame[0], frame[1]])),
+                frame.len() - 2
+            );
+            let response: serde_json::Value = serde_json::from_slice(&frame[2..]).unwrap();
+            assert_eq!(response["kind"], kind);
+            assert!(
+                !String::from_utf8(frame[2..].to_vec())
+                    .unwrap()
+                    .contains("private prompt")
+            );
+        }
+    }
+
+    #[test]
+    fn staged_response_rejects_wrong_operation_and_bad_frame() {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return;
+        }
+        let (dir, root, _) = fixture();
+        let path = dir.path().join("protected/coord/coord.db");
+        let store = open_checked(
+            &path,
+            &root,
+            Path::new("protected/coord/coord.db"),
+            uid,
+            uid,
+        )
+        .unwrap();
+        let policy = ReadPeerPolicy::new(uid, uid + 1, uid + 2).unwrap();
+        assert_eq!(
+            prepare(&store, &policy, &framed_request("graph_state", "graph_123")).unwrap_err(),
+            "coordinator peer is not authorized for operation"
+        );
+        assert_eq!(
+            prepare(&store, &policy, &[0, 0]).unwrap_err(),
+            "coordinator request size is invalid"
+        );
+    }
+
+    #[test]
+    fn staged_response_fails_closed_on_invalid_projection() {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return;
+        }
+        let (dir, root, _) = fixture();
+        let path = dir.path().join("protected/coord/coord.db");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute("UPDATE tasks SET graph_run_id = 'invalid'", [])
+            .unwrap();
+        drop(writer);
+        let store = open_checked(
+            &path,
+            &root,
+            Path::new("protected/coord/coord.db"),
+            uid,
+            uid,
+        )
+        .unwrap();
+        let policy = ReadPeerPolicy::new(uid, uid, uid + 1).unwrap();
+        assert_eq!(
+            prepare(&store, &policy, &framed_request("task_state", "task_123")).unwrap_err(),
+            "protected task state or graph ID is invalid"
+        );
+    }
 
     fn fixture() -> (tempfile::TempDir, File, u32) {
         let dir = tempfile::tempdir().unwrap();

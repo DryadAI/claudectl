@@ -5,6 +5,14 @@ service, socket, CLI client, scheduler relocation or broker activation. This
 extends the request contract in `druid-protected-coordinator-read-contract.md`
 with a guarded SQLite read opener and two explicit status projections.
 
+The staged `prepare_staged_response` helper composes the existing authenticated,
+operation-authorized request parser, the narrow store projection and the bounded
+response encoder for **one already-connected Unix stream and one already-opened
+store**. It returns bytes to its caller; it does not write them, bind or listen
+on a socket, choose a host path or change the inert dispatcher. Tests use only
+an in-process Unix socket pair and synthetic SQLite layout. Connection closure,
+host-pinned policy and response writing remain separate future service work.
+
 The proposed opener requires the process effective UID to equal a non-root,
 dedicated coordinator UID. The DB path must be absolute and end in
 `coord/coord.db`. From `/`, it opens every ancestor with `openat(O_NOFOLLOW)`;
