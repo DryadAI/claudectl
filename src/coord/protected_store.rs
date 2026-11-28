@@ -304,7 +304,9 @@ fn open_checked(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    use std::os::fd::RawFd;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener;
 
     /// Invoked only by scripts/verify_druid_protected_namespace.sh inside an
     /// isolated user/mount/network namespace and disposable chroot. The
@@ -380,6 +382,25 @@ mod tests {
                 assert_eq!(
                     open_read_only(path, COORDINATOR_UID).err().as_deref(),
                     Some("protected coordinator schema version is not exact")
+                );
+            }
+            "socket_server" => {
+                assert_eq!(uid, COORDINATOR_UID);
+                let fd: RawFd = std::env::var("DRUID_PROOF_LISTEN_FD")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                // SAFETY: the disposable namespace harness passes a live,
+                // inherited AF_UNIX listening FD and transfers ownership.
+                let listener = unsafe { UnixListener::from_raw_fd(fd) };
+                let store = open_read_only(path, COORDINATOR_UID).unwrap();
+                let policy = ReadPeerPolicy::new(1000, 1000, COORDINATOR_UID).unwrap();
+                let (operator, _) = listener.accept().unwrap();
+                serve_one_staged_read(operator, &policy, &store).unwrap();
+                let (root, _) = listener.accept().unwrap();
+                assert_eq!(
+                    serve_one_staged_read(root, &policy, &store).unwrap_err(),
+                    "coordinator peer is not authorized"
                 );
             }
             other => panic!("unknown disposable proof mode: {other}"),

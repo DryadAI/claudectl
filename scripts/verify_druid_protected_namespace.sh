@@ -4,7 +4,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
-for command_name in cargo jq rg unshare mount chroot sqlite3; do
+for command_name in cargo jq rg unshare mount chroot sqlite3 python3; do
   command -v "$command_name" >/dev/null || {
     printf 'BLOCKED: missing %s\n' "$command_name" >&2
     exit 1
@@ -55,18 +55,21 @@ unshare --user --mount --net --propagation private \
   --map-users "0:$outer_uid:1" --map-users "1:$subuid_start:$subuid_count" \
   --map-groups "0:$outer_gid:1" --map-groups "1:$subgid_start:$subgid_count" \
   --setuid 0 --setgid 0 \
-  bash -s -- "$proof_dir" "$(dirname "$test_binary")" "$(basename "$test_binary")" <<'PROOF'
+  bash -s -- "$proof_dir" "$(dirname "$test_binary")" "$(basename "$test_binary")" \
+    "$repo_root/scripts/probe_druid_read_socket.py" <<'PROOF'
 set -euo pipefail
 root=$1
 binary_dir=$2
 binary_name=$3
+socket_probe=$4
 
 # Every fixture is on a tmpfs visible only in this mount namespace. The
 # namespace has no network and no host path to the operator-profile ledger.
 mount -t tmpfs -o size=128m,mode=0755 tmpfs "$root"
-trap 'umount "$root/probe" 2>/dev/null || true; umount "$root/usr" 2>/dev/null || true; umount "$root" 2>/dev/null || true' EXIT
+trap 'umount "$root/probe-socket.py" 2>/dev/null || true; umount "$root/probe" 2>/dev/null || true; umount "$root/usr" 2>/dev/null || true; umount "$root" 2>/dev/null || true' EXIT
 mkdir -p "$root/usr" "$root/probe" "$root/tmp/seed-profile" \
   "$root/var/lib/druid-coordinator/coord"
+touch "$root/probe-socket.py"
 chmod 1777 "$root/tmp"
 chmod 0700 "$root/tmp/seed-profile" "$root/var/lib/druid-coordinator/coord"
 chown 1001:1001 "$root/tmp/seed-profile" "$root/var/lib/druid-coordinator/coord"
@@ -74,8 +77,10 @@ ln -s usr/lib "$root/lib"
 ln -s usr/lib "$root/lib64"
 mount --bind /usr "$root/usr"
 mount --bind "$binary_dir" "$root/probe"
+mount --bind "$socket_probe" "$root/probe-socket.py"
 mount -o remount,bind,ro "$root/usr"
 mount -o remount,bind,ro "$root/probe"
+mount -o remount,bind,ro "$root/probe-socket.py"
 
 run_case() {
   local mode=$1 uid=$2 label=${3:-$1}
@@ -144,6 +149,8 @@ chroot --groups= --userspec=1001:1001 "$root" /usr/bin/sqlite3 \
   -batch /var/lib/druid-coordinator/coord/coord.db \
   'PRAGMA user_version=9;'
 run_case coordinator 1001
+chroot --groups= --userspec=0:0 "$root" /usr/bin/python3 -I /probe-socket.py \
+  "/probe/$binary_name"
 printf 'PASS: disposable namespace identity, private storage and guarded opener probes\n'
 printf 'NOT PROVEN: actual Precision service, same-UID path-swap race, reboot or live cutover\n'
 PROOF

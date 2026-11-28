@@ -56,5 +56,14 @@ After owner approval of the host *design*, the disposable namespace harness in
 separate synthetic process UIDs and a tmpfs-backed `/var/lib` layout. It
 passed the listed positive/negative cases on 2026-11-28. This advances the
 source boundary beyond unit fixtures; it does not prove actual Precision
-installation, service/socket behavior or the documented same-UID path-swap
+installation, host service/socket behavior or the documented same-UID path-swap
 race. The production dispatcher remains inert.
+
+The namespace harness now also creates the approved-for-proof root:operator
+0660 Unix socket under a root-owned runtime directory. Synthetic operator,
+worker, coordinator and root processes exercise DAC, then an inherited
+listener is served by the Rust handler as synthetic coordinator UID. The
+operator receives a bounded status response; worker/coordinator cannot
+connect; root can connect through DAC but is rejected by `SO_PEERCRED` policy.
+This is an integrated **disposable** process/socket proof, not a persistent
+service, Precision account installation, same-UID race proof or cutover.

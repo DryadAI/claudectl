@@ -1,9 +1,11 @@
 # Protected coordinator host decision packet
 
-Status: **owner approved the proposed design in conversation on 2026-11-28;
-not installed or activated**. This packet narrows the
+Status: **owner approved the proposed identity/path direction and then the
+socket/service proof direction in conversation on 2026-11-28; not installed
+or activated**. This packet narrows the
 identity, path and peer choice required by the source-only protected read code.
-It does not authorize a live ledger migration, service, broker or worker.
+It does not authorize live ledger migration, production cutover, broker or
+worker activation. Exact service implementation remains unreviewed.
 
 ## Read-only Precision observations
 
@@ -28,7 +30,7 @@ No coordinator DB, snapshot, secret or running service was opened.
 | Read peer: task state | existing `katalyst` UID, resolved at service start from protected host configuration | one operator status reader; no write or approval authority |
 | Read peer: graph state | same `katalyst` UID initially | avoids another account until a distinct reader is justified |
 | Denied read peers | root, `druid-worker`, `druid-coordinator`, all other UIDs | source policy rejects root/coordinator; host config must exclude worker |
-| Local socket | root-managed `/run/druid-coordinator/read.sock`; candidate root:`katalyst` 0660 under root:root 0755 directory | operator can connect without direct DB access; peer UID policy still rejects root, worker and coordinator |
+| Local socket | root-managed `/run/druid-coordinator/read.sock`; root:`katalyst` 0660 under root:root 0755 directory, approved for non-production proof | operator can connect without direct DB access; peer UID policy still rejects root, worker and coordinator |
 
 The static UID number must be allocated and verified **at installation time**;
 do not hardcode an unverified number in source or accept one from a graph,
@@ -41,14 +43,15 @@ launch, SQL, path, shell or generic graph mutation authority.
 ## Decision and proof gates
 
 1. Owner approved the proposed account, root-owned parent and operator-only
-   read-peer direction on 2026-11-28. A candidate socket ACL is now specified
-   for review, not installed or owner-approved. On the checked Precision
+   read-peer direction on 2026-11-28, then approved the proposed socket ACL
+   and protected service direction for continued proof. On the checked Precision
    snapshot, `katalyst` was the sole passwd user with primary GID 1000 and
    `getent group katalyst` listed no supplementary members; recheck both at
    installation. Root-owned parent and `SO_PEERCRED` are both required: socket
    DAC alone cannot distinguish an allowed UID from a different user sharing
-   that group. Account creation, permissions and systemd changes are **not**
-   covered by this source PR or the earlier design approval.
+   that group. Any Precision installation must be a separate scoped,
+   non-production proof with a reviewed binary and rollback; this source PR
+   installs nothing.
 2. In a disposable host environment, create the selected layout and prove
    `open_read_only` accepts only the dedicated coordinator identity and the
    exact schema-v9 DB. Prove operator and worker cannot directly open
@@ -81,9 +84,10 @@ launch, SQL, path, shell or generic graph mutation authority.
    headless broker/worker/model activation. A merged PR or passing unit test
    does not lift these gates.
 
-Open: owner review of the candidate Unix socket ACL, host-managed service
-hardening, backup destination and rollback procedure. These require a
-disposable-host proof before selection. Do not substitute a root process
+Open: host-managed service implementation/hardening, a non-production host
+proof and rollback, and the live-ledger backup destination/cutover procedure.
+The approved socket ACL has only passed a disposable namespace DAC probe;
+it has not been installed on Precision. Do not substitute a root process
 opening the operator-profile ledger.
 
 ## Disposable namespace evidence (source-only)
@@ -103,10 +107,21 @@ state. Synthetic operator and worker UIDs got permission-denied on the DB,
 both sidecars and a rename attempt. Namespace root could read through DAC
 but the guarded opener rejected root. The opener rejected world-readable
 WAL, DB symlink/hardlink, writable root-owned ancestor, SHM symlink and
-schema v8; restored v9 reopened successfully. No fixture directory remained
+schema v8; restored v9 reopened successfully. An additional actual-process
+socket probe in the same disposable namespace created a root:operator 0660
+socket under a root-owned 0755 directory. The synthetic operator connected;
+synthetic worker and coordinator UIDs received DAC denial; namespace root
+could connect but `SO_PEERCRED` identified UID 0. A second pass inherited
+that socket into the Rust test handler running as the synthetic coordinator
+UID: the operator received a bounded `not_found` response, worker and
+coordinator still could not connect, and the handler rejected namespace root
+by kernel peer identity without returning a status payload. This
+does not prove a running DRUID service or actual Precision group membership.
+No fixture directory remained
 under the proof prefix. The full isolated-profile Rust suite passed
-947/963/6/78/16/8; format, diff and Clippy with the existing Hive allowance
-passed. This is independent process/UID evidence beyond the synthetic unit
+949/965/6/78/16/8; format, diff and Clippy with the existing Hive allowance
+passed at source revision `6d14f17` before the socket probe addition. This
+is independent process/UID evidence beyond the synthetic unit
 fixtures, but **not** a complete actual-host or race proof.
 
 Still unproved: a hostile process sharing the coordinator UID could swap a
