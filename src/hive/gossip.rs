@@ -358,10 +358,7 @@ fn is_propagatable_static(
         return false;
     }
     let age = epoch_secs().saturating_sub(unit.last_validated_at);
-    if age > ttl_secs {
-        return false;
-    }
-    true
+    age <= ttl_secs
 }
 
 // ────────────────────────────────────────────────────────────────────────────

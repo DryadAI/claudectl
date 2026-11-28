@@ -5,6 +5,10 @@
 //! not writable by the worker identity, verifies its mode and checks the
 //! protected revocation ledger before constructing a `WorkerConfig`.
 
+// The headless adapter still needs PolicyPermit in hive-only builds, but the
+// coordinator-side policy parser is intentionally inactive without `coord`.
+#![cfg_attr(not(feature = "coord"), allow(dead_code))]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;

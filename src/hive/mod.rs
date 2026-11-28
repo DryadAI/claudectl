@@ -218,10 +218,7 @@ impl SharingConsent {
                 return false;
             }
         }
-        if !self.min_trust_tier.admits_rank(target_rank) {
-            return false;
-        }
-        true
+        self.min_trust_tier.admits_rank(target_rank)
     }
 }
 

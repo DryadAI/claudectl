@@ -108,10 +108,7 @@ impl EffectivenessFilter<'_> {
                 return false;
             }
         }
-        if unit.injection_stats.decided() < self.min_decided {
-            return false;
-        }
-        true
+        unit.injection_stats.decided() >= self.min_decided
     }
 }
 

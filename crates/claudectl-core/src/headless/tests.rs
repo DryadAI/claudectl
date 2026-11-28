@@ -83,7 +83,9 @@ fn fixed_argv_and_no_inherited_environment() {
 #[test]
 fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
     let (_dir, mut config) = fixture("exit 0");
-    config.environment.insert("ANTHROPIC_API_KEY".into(), "forbidden".into());
+    config
+        .environment
+        .insert("ANTHROPIC_API_KEY".into(), "forbidden".into());
     assert!(config.command().is_err());
     config.environment.clear();
     config.network = NetworkMode::RootOwnedLoopbackProxy {
@@ -99,9 +101,14 @@ fn subscription_proxy_mode_is_exact_and_never_accepts_api_keys() {
         config.environment.insert(key.into(), value.into());
     }
     let command = config.command().unwrap();
-    let args: Vec<_> = command.get_args().map(|value| value.to_str().unwrap()).collect();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|value| value.to_str().unwrap())
+        .collect();
     assert!(args.contains(&"--share-net"));
-    config.environment.insert("NO_PROXY".into(), "localhost".into());
+    config
+        .environment
+        .insert("NO_PROXY".into(), "localhost".into());
     assert!(config.command().is_err());
 }
 
@@ -124,7 +131,9 @@ fn worker_process_uses_the_configured_host_identity() {
     ));
     run(&config, "x", &AtomicBool::new(false)).unwrap();
     assert_eq!(
-        std::fs::read_to_string(config.workspace.join("worker_uid")).unwrap().trim(),
+        std::fs::read_to_string(config.workspace.join("worker_uid"))
+            .unwrap()
+            .trim(),
         config.run_as_uid.to_string()
     );
 }
